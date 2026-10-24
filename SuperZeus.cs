@@ -9,6 +9,7 @@ using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
 
@@ -34,7 +35,6 @@ namespace ZeusOnlyMode
         // Avoid weapon_taser_flash (and weapon_muzzle_flash_taser, which
         // contains it): it's a viewmodel sprite drawn MOD2X with 10x overbright
         // and no z-buffering, so out in the world it renders as a white box.
-        private const string FxBallCore = "particles/ambient_fx/ambient_sparks_glow.vpcf";          // looping arcs + flares + particle light
         private const string FxBallGlow = "particles/generic_fx/fx_electricspark_glow.vpcf";        // electric arc sprites + light
         private const string FxBallSparks = "particles/weapons/cs_weapon_fx/weapon_taser_sparks.vpcf";
         private const string FxMuzzleGlow = "particles/weapons/cs_weapon_fx/weapon_taser_glow.vpcf";
@@ -51,7 +51,7 @@ namespace ZeusOnlyMode
         private static readonly string[] SuperZeusResources =
         {
             BallCarrierModel,
-            FxBallCore, FxBallGlow, FxBallSparks, FxMuzzleGlow, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
+            FxBallGlow, FxBallSparks, FxMuzzleGlow, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
             FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris
         };
 
@@ -74,12 +74,23 @@ namespace ZeusOnlyMode
             public required float ReadyAt;
         }
 
+        // One crackling arc: jagged points stored relative to the ball so the
+        // arc travels with it, each segment drawn as a dim wide glow beam with
+        // a bright thin beam on top
+        private sealed class Tendril
+        {
+            public readonly List<CHandle<CBeam>> Glow = new();
+            public readonly List<CHandle<CBeam>> Line = new();
+            public Vector3[] Offsets = Array.Empty<Vector3>();
+        }
+
         private sealed class LightningBall
         {
             public required CHandle<CDecoyProjectile> Projectile;
-            public CHandle<CParticleSystem>? Core;
             public CHandle<CBeam>? Tail;
-            public readonly List<CHandle<CBeam>> Arcs = new();
+            public readonly List<CHandle<CBeam>> Glow = new();      // soft glow wedges
+            public readonly List<CHandle<CBeam>> Core = new();      // small hot center
+            public readonly List<Tendril> Tendrils = new();          // electric arcs
             public required int OwnerSlot;
             public required byte OwnerTeam;
             public required ZeusColorOption? Color; // null = stock electric blue
@@ -336,32 +347,37 @@ namespace ZeusOnlyMode
                 ExpireTime = Server.CurrentTime + BallLifetime
             };
 
-            // The stock particles are baked white-blue and can't be recolored,
-            // so a colored ball drops them: its body is a few soft tapered
-            // rays, a tapered comet tail, and real sparks (EmitBallSparks)
-            bool colored = ball.Color != null;
-            if (!colored)
+            // A small BFG-style ball in the player's color (stock blue on
+            // Default): a soft glowing sphere, a hot core, crackling tendrils,
+            // a faint tail and a few sparks. The stock particles are baked
+            // white-blue and can't be recolored, so the ball is built from beams.
+            for (int i = 0; i < BallGlowWedges; i++)
             {
-                var core = SpawnParticle(FxBallCore, spawnPos, angles, 0f);
-                if (core != null) ball.Core = HandleOf(core);
+                var wedge = CreateBeam(spawnPos, spawnPos, BallGlowColor(ball), BallGlowWidth, 0.05f);
+                if (wedge != null) ball.Glow.Add(HandleOf(wedge));
             }
 
-
-            int arcCount = colored ? ColoredBallRays : 4;
-            for (int i = 0; i < arcCount; i++)
+            for (int i = 0; i < BallCoreWedges; i++)
             {
-                // Colored rays taper to a point so they read as soft glow, not lines
-                var arc = colored
-                    ? CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 0.6f : 0.9f, 0.1f)
-                    : CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 0.4f : 0.8f);
-                if (arc != null) ball.Arcs.Add(HandleOf(arc));
+                var wedge = CreateBeam(spawnPos, spawnPos, BallCoreColor(ball), BallCoreWidth, 0.05f);
+                if (wedge != null) ball.Core.Add(HandleOf(wedge));
             }
 
-            if (colored)
+            for (int t = 0; t < BallTendrils; t++)
             {
-                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 0.5f, 0.05f);
-                if (tail != null) ball.Tail = HandleOf(tail);
+                var tendril = new Tendril { Offsets = TendrilShape() };
+                for (int s = 0; s < BallTendrilSegments; s++)
+                {
+                    var glow = CreateBeam(spawnPos, spawnPos, BallTendrilGlowColor(ball), 1.0f, 0.4f);
+                    if (glow != null) tendril.Glow.Add(HandleOf(glow));
+                    var line = CreateBeam(spawnPos, spawnPos, BallTendrilLineColor(ball), 0.3f, 0.1f);
+                    if (line != null) tendril.Line.Add(HandleOf(line));
+                }
+                ball.Tendrils.Add(tendril);
             }
+
+            var tail = CreateBeam(spawnPos, spawnPos, Scale(BoltGlowColor(ball.Color), 0.6f), 0.5f, 0.05f);
+            if (tail != null) ball.Tail = HandleOf(tail);
 
             lightningBalls.Add(ball);
 
@@ -475,42 +491,7 @@ namespace ZeusOnlyMode
             // Keep the flight dead straight regardless of how the decoy simulates gravity
             projectile.Teleport(null, null, (Vector3?)ball.Velocity);
 
-            var angles = DirectionToAngles(ball.Velocity);
-            ball.Core?.Value?.Teleport(pos, angles, Vector3.Zero);
-
-
-            // Re-roll the arcs every tick so the ball constantly writhes; a
-            // colored ball's soft rays stay short so they read as a glow
-            bool colored = ball.Color != null;
-            for (int i = 0; i < ball.Arcs.Count; i++)
-            {
-                var arc = ball.Arcs[i].Value;
-                if (arc == null || !arc.IsValid) continue;
-
-                float reach = colored ? 6f + rng.NextSingle() * 8f : 14f + rng.NextSingle() * 14f;
-                arc.Teleport(pos + RandomUnit() * (colored ? 1f : 3f), Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(arc, pos + RandomUnit() * reach, true);
-            }
-
-            var tail = ball.Tail?.Value;
-            if (tail != null && tail.IsValid)
-            {
-                tail.Teleport(pos, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(tail, pos - Vector3.Normalize(ball.Velocity) * 56f, true);
-            }
-
-            if (colored)
-            {
-                EmitBallSparks(ball, pos);
-            }
-            else
-            {
-                // Spark and glow puffs left behind in the world form the stock trail
-                if (ball.Age % 4 == 0)
-                    SpawnParticle(FxBallSparks, pos, angles, 1f);
-                if (ball.Age % 6 == 0)
-                    SpawnParticle(FxBallGlow, pos, angles, 1f);
-            }
+            AnimateBallBody(ball, pos);
 
             ball.LastPosition = pos;
             ball.Age++;
@@ -609,14 +590,7 @@ namespace ZeusOnlyMode
 
             try
             {
-                pawn.RagdollDamageForce.X = launch.X * 100f;
-                pawn.RagdollDamageForce.Y = launch.Y * 100f;
-                pawn.RagdollDamageForce.Z = launch.Z * 100f;
-                pawn.RagdollDamagePosition.X = chest.X;
-                pawn.RagdollDamagePosition.Y = chest.Y;
-                pawn.RagdollDamagePosition.Z = chest.Z;
-                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
-                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamagePosition");
+                StampRagdollImpulse(pawn, launch);
             }
             catch (Exception ex)
             {
@@ -642,6 +616,19 @@ namespace ZeusOnlyMode
             {
                 Logger.LogError("[SuperZeus] Strike effects failed: {Message}", ex.Message);
             }
+        }
+
+        // Kept in its own non-inlined method on purpose: schema fields come and
+        // go between CS2 updates (m_vRagdollDamagePosition was removed), and a
+        // missing member only fails the method that references it. Isolated
+        // here, that can never stop the kill in StrikeVictim.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void StampRagdollImpulse(CCSPlayerPawn pawn, Vector3 launch)
+        {
+            pawn.RagdollDamageForce.X = launch.X * 100f;
+            pawn.RagdollDamageForce.Y = launch.Y * 100f;
+            pawn.RagdollDamageForce.Z = launch.Z * 100f;
+            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
         }
 
         // Forced suicide; if the pawn is somehow still alive, fall back to the
@@ -678,15 +665,88 @@ namespace ZeusOnlyMode
             return flash;
         }
 
-        private const int ColoredBallRays = 5;
+        private const int BallGlowWedges = 12;
+        private const float BallGlowRadius = 12f;
+        private const float BallGlowWidth = 10f;
+        private const int BallCoreWedges = 4;
+        private const float BallCoreRadius = 4.5f;
+        private const float BallCoreWidth = 4.5f;
+        private const int BallTendrils = 3;
+        private const int BallTendrilSegments = 4;
 
-        // Stock ball: hot whitened cores alternating with blue glow arcs.
-        // Colored ball: barely whitened cores so the color stays saturated.
-        private static Color BallArcColor(LightningBall ball, int index)
+        // Dim wide wedges overlap into a soft sphere: brightest in the middle,
+        // fading toward the edge. The core is small and nearly white-hot.
+        private static Color BallGlowColor(LightningBall ball) => Scale(BoltGlowColor(ball.Color), 0.22f);
+        private static Color BallCoreColor(LightningBall ball) => Scale(Whiten(BoltGlowColor(ball.Color), 0.7f), 0.8f);
+        private static Color BallTendrilGlowColor(LightningBall ball) => Scale(BoltGlowColor(ball.Color), 0.45f);
+        private static Color BallTendrilLineColor(LightningBall ball) => Whiten(BoltGlowColor(ball.Color), 0.4f);
+
+        // A jagged arc reaching out from the ball, as offsets from its center
+        private Vector3[] TendrilShape()
         {
-            if (index % 2 != 0)
-                return BoltGlowColor(ball.Color);
-            return ball.Color == null ? ArcCoreColor : Whiten(ball.Color.Color, 0.25f);
+            var tip = RandomUnit() * (22f + rng.NextSingle() * 20f);
+            var points = new Vector3[BallTendrilSegments + 1];
+            for (int i = 0; i <= BallTendrilSegments; i++)
+            {
+                float t = i / (float)BallTendrilSegments;
+                var jitter = i == 0 || i == BallTendrilSegments ? Vector3.Zero : RandomUnit() * 6f * MathF.Sin(t * MathF.PI);
+                points[i] = tip * t + jitter;
+            }
+            return points;
+        }
+
+        private void AnimateBallBody(LightningBall ball, Vector3 pos)
+        {
+            // Glow and core wedges re-angle every tick, so the sphere shimmers
+            foreach (var handle in ball.Glow)
+            {
+                var wedge = handle.Value;
+                if (wedge == null || !wedge.IsValid) continue;
+                wedge.Teleport(pos, Vector3.Zero, Vector3.Zero);
+                SetBeamEnd(wedge, pos + RandomUnit() * BallGlowRadius * (0.8f + rng.NextSingle() * 0.3f), true);
+            }
+
+            foreach (var handle in ball.Core)
+            {
+                var wedge = handle.Value;
+                if (wedge == null || !wedge.IsValid) continue;
+                wedge.Teleport(pos, Vector3.Zero, Vector3.Zero);
+                SetBeamEnd(wedge, pos + RandomUnit() * BallCoreRadius, true);
+            }
+
+            // Tendrils re-strike at random and otherwise ride along with the ball
+            foreach (var tendril in ball.Tendrils)
+            {
+                if (rng.NextSingle() < 0.35f)
+                    tendril.Offsets = TendrilShape();
+
+                for (int s = 0; s < BallTendrilSegments; s++)
+                {
+                    var a = pos + tendril.Offsets[s];
+                    var b = pos + tendril.Offsets[s + 1];
+                    MoveBallBeam(s < tendril.Glow.Count ? tendril.Glow[s] : null, a, b);
+                    MoveBallBeam(s < tendril.Line.Count ? tendril.Line[s] : null, a, b);
+                }
+            }
+
+            var tail = ball.Tail?.Value;
+            if (tail != null && tail.IsValid)
+            {
+                tail.Teleport(pos, Vector3.Zero, Vector3.Zero);
+                SetBeamEnd(tail, pos - Vector3.Normalize(ball.Velocity) * 48f, true);
+            }
+
+            // A few sparks shed as it flies
+            if (rng.NextSingle() < 0.5f)
+                EmitBallSparks(ball, pos);
+        }
+
+        private static void MoveBallBeam(CHandle<CBeam>? handle, Vector3 start, Vector3 end)
+        {
+            var beam = handle?.Value;
+            if (beam == null || !beam.IsValid) return;
+            beam.Teleport(start, Vector3.Zero, Vector3.Zero);
+            SetBeamEnd(beam, end, true);
         }
 
         // Player color, or the stock blue
@@ -722,12 +782,12 @@ namespace ZeusOnlyMode
 
         private void EmitBallSparks(LightningBall ball, Vector3 pos)
         {
-            int count = rng.NextSingle() < 0.5f ? 1 : 2;
+            int count = 1;
             for (int i = 0; i < count && ballSparks.Count < MaxBallSparks; i++)
             {
                 var start = pos + RandomUnit() * 3f;
                 var vel = ball.Velocity * 0.1f + RandomUnit() * (140f + rng.NextSingle() * 260f) + new Vector3(0f, 0f, 60f);
-                var color = ball.Color!.Color;
+                var color = BoltGlowColor(ball.Color);
 
                 var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.2f);
                 if (beam == null) return;
@@ -888,10 +948,14 @@ namespace ZeusOnlyMode
         private void DestroyLightningBall(LightningBall ball)
         {
             RemoveEntity(ball.Projectile);
-            if (ball.Core != null) RemoveEntity(ball.Core);
             if (ball.Tail != null) RemoveEntity(ball.Tail);
-            foreach (var arc in ball.Arcs)
-                RemoveEntity(arc);
+            foreach (var beam in ball.Glow) RemoveEntity(beam);
+            foreach (var beam in ball.Core) RemoveEntity(beam);
+            foreach (var tendril in ball.Tendrils)
+            {
+                foreach (var beam in tendril.Glow) RemoveEntity(beam);
+                foreach (var beam in tendril.Line) RemoveEntity(beam);
+            }
         }
 
         private void ClearLightningBalls()

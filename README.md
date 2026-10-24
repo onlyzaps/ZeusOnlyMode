@@ -9,6 +9,8 @@ To activate and deactivate the plugin, you must type css_zeus_mode 0 or 1 into t
 Stripped loadouts are saved to an internal database, and are then restored upon disabling of the
 plugin. 
 
+Requires CounterStrikeSharp 1.0.378 or newer (.NET 10).
+
 Super Zeus
 ----------
 Admins (@css/generic) can type superzeus in console, or superzeus / !superzeus / /superzeus in chat,
