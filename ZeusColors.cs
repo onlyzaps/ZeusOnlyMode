@@ -96,7 +96,6 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
 
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
-            RegisterListener<Listeners.OnPlayerButtonsChanged>(OnZeusColorButtons);
             RegisterListener<Listeners.OnTick>(() =>
             {
                 if (colorZaps.Count > 0)
@@ -187,111 +186,134 @@ namespace ZeusOnlyMode
             AngleVectors(new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0f), out var forward, out var right, out var up);
             var muzzle = eye + forward * 16f + right * (pawn.LeftHanded ? -5f : 5f) - up * 6f;
 
-            // Same two wires the stock zap draws (weapon_tracers_taser_wire1a/b),
-            // each falling under its own gravity
-            colorZaps.Add(new ColorZap(this, muzzle, end, color, 350f));
-            colorZaps.Add(new ColorZap(this, muzzle, end, color, 500f));
+            // Same two wires the stock zap strings (weapon_tracers_taser_wire1a/b),
+            // each falling under its own gravity until it reaches the floor
+            float floorZ = Math.Min(pawn.AbsOrigin.Z, end.Z) + 1f;
+            colorZaps.Add(new ColorZap(this, muzzle, end, color, 350f, floorZ));
+            colorZaps.Add(new ColorZap(this, muzzle, end, color, 500f, floorZ));
         }
 
         // --- Colored copy of the stock zap ----------------------------------
         //
-        // The stock zap (weapon_tracers_taser) is two wire ropes strung from
-        // the muzzle to the impact point: they bulge slightly, sag under
-        // gravity pinned at both ends, and fade out over 1.8s, while a bright
-        // crackle rope (wire2) flashes along them for the first instant. Its
-        // colors are baked into the particle files, so this rebuilds the same
-        // shapes and timing out of beams in the player's color and lays them
-        // over the stock zap.
+        // Rebuilt from the stock effect (weapon_tracers_taser). Its two probe
+        // wires (wire1a/1b) are invisible carriers: 15 points strung from the
+        // muzzle to the probe, each falling under its own gravity (350 / 500)
+        // with light drag, held still near both ends for the first moments
+        // (DampenToCP: 25 unit range, faded out between 0.25s and 0.5s),
+        // pinned within 8 units of either end, and stopped by the world.
+        // What you actually see is the crackle rope riding them (wire2):
+        // it appears 0.05s after the shot, lives 0.4s, is thickest mid-span
+        // and thin at both ends, thins to 35% over its life, fades over its
+        // last 0.1s, and is smoothly tessellated. The colors are baked into
+        // the particle files, so the same rope is drawn here out of beams in
+        // the player's color: a smooth spline through the carrier points,
+        // each beam tapering into the next, with a per-segment flicker in
+        // place of the crackle texture.
 
-        private const int ZapWireSegments = 16;
-        private const float ZapLifetime = 1.8f;
-        private const float ZapCrackleSeconds = 0.2f;
-        private const float ZapFadeStart = 0.4f;
-        private const float ZapMaxSag = 120f;
+        private const int ZapWirePoints = 15;
+        private const int ZapSubdivisions = 2;          // spline samples between carrier points
+        private const float ZapRopeDelay = 0.05f;
+        private const float ZapRopeLife = 0.4f;
+        private const float ZapRopeFade = 0.1f;
+        private const float ZapRopeEndScale = 0.35f;
+        private const float ZapRopePeakWidth = 1.2f;
+        private const float ZapDrag = 0.05f;
+        private const float ZapDampenRange = 25f;
+        private const float ZapDampenScale = 0.025f;
+        private const float ZapDampenFadeStart = 0.25f;
+        private const float ZapDampenFadeEnd = 0.5f;
+        private const float ZapLockRange = 8f;
 
         private readonly List<ColorZap> colorZaps = new();
 
         private sealed class ColorZap
         {
             private readonly ZeusOnlyPlugin plugin;
-            private readonly Vector3[] basePoints;
-            private readonly Vector3[] bulge;
-            private readonly List<CHandle<CBeam>> crackle = new();
-            private readonly List<CHandle<CBeam>> wire = new();
+            private readonly Vector3 start;
+            private readonly Vector3 end;
+            private readonly Vector3[] points = new Vector3[ZapWirePoints];
+            private readonly Vector3[] velocities = new Vector3[ZapWirePoints];
+            private readonly bool[] locked = new bool[ZapWirePoints];
+            private readonly List<CHandle<CBeam>> rope = new();
             private readonly ZeusColorOption color;
             private readonly float gravity;
+            private readonly float floorZ;
             private readonly float startTime;
+            private float lastUpdate;
 
-            public ColorZap(ZeusOnlyPlugin plugin, Vector3 start, Vector3 end, ZeusColorOption color, float gravity)
+            public ColorZap(ZeusOnlyPlugin plugin, Vector3 start, Vector3 end, ZeusColorOption color, float gravity, float floorZ)
             {
                 this.plugin = plugin;
+                this.start = start;
+                this.end = end;
                 this.color = color;
                 this.gravity = gravity;
-                startTime = Server.CurrentTime;
+                this.floorZ = floorZ;
+                startTime = lastUpdate = Server.CurrentTime;
 
-                // One smooth bow per wire (like the rope's path bulge), never a
-                // per-point kink, so the wire reads as a soft curve
-                var span = end - start;
-                var side = Vector3.Cross(span, Vector3.UnitZ);
-                if (side.LengthSquared() < 0.01f) side = Vector3.UnitX;
-                side = Vector3.Normalize(side) * (plugin.rng.NextSingle() * 2f - 1f) + Vector3.UnitZ * (plugin.rng.NextSingle() * 0.6f);
-                side = Vector3.Normalize(side) * 6f;
+                // Sequential path with a slight bulge to one side, like the
+                // wire paying out of the cartridge
+                var side = Vector3.Cross(end - start, Vector3.UnitZ);
+                side = side.LengthSquared() < 0.01f ? Vector3.UnitX : Vector3.Normalize(side);
+                side = Vector3.Normalize(side * (plugin.rng.NextSingle() * 2f - 1f) + Vector3.UnitZ * (plugin.rng.NextSingle() * 0.5f));
+                float bulge = Math.Min(Vector3.Distance(start, end) * 0.02f, 6f);
 
-                basePoints = new Vector3[ZapWireSegments + 1];
-                bulge = new Vector3[ZapWireSegments + 1];
-                for (int i = 0; i <= ZapWireSegments; i++)
+                for (int i = 0; i < ZapWirePoints; i++)
                 {
-                    float t = i / (float)ZapWireSegments;
-                    basePoints[i] = Vector3.Lerp(start, end, t);
-                    bulge[i] = side * MathF.Sin(t * MathF.PI);
-                }
-
-                var points = PointsAt(0f);
-                for (int i = 0; i < ZapWireSegments; i++)
-                {
-                    var c = CreateBeam(points[i], points[i + 1], CrackleColor(i, 1f), 1f);
-                    if (c != null) crackle.Add(HandleOf(c));
-                    var w = CreateBeam(points[i], points[i + 1], WireColor(i, 1f), 0.3f);
-                    if (w != null) wire.Add(HandleOf(w));
+                    float t = i / (float)(ZapWirePoints - 1);
+                    points[i] = Vector3.Lerp(start, end, t) + side * bulge * MathF.Sin(t * MathF.PI);
+                    locked[i] = Vector3.Distance(points[i], start) < ZapLockRange || Vector3.Distance(points[i], end) < ZapLockRange;
                 }
             }
 
-            // Returns false once the zap has fully faded
+            // Returns false once the rope has faded
             public bool Update()
             {
-                float age = Server.CurrentTime - startTime;
-                if (age >= ZapLifetime)
+                float now = Server.CurrentTime;
+                float age = now - startTime;
+                if (age >= ZapRopeDelay + ZapRopeLife)
                 {
                     Destroy();
                     return false;
                 }
 
-                bool crackling = age < ZapCrackleSeconds;
-                var points = PointsAt(age);
+                Simulate(age, now - lastUpdate);
+                lastUpdate = now;
 
-                float crackleFade = crackling ? 1f - age / ZapCrackleSeconds : 0f;
-                float wireFade = age < ZapFadeStart ? 1f : 1f - (age - ZapFadeStart) / (ZapLifetime - ZapFadeStart);
+                if (age < ZapRopeDelay)
+                    return true;
 
-                for (int i = 0; i < ZapWireSegments; i++)
+                float life = (age - ZapRopeDelay) / ZapRopeLife;
+                float fade = Math.Clamp((ZapRopeDelay + ZapRopeLife - age) / ZapRopeFade, 0f, 1f);
+                float widthScale = 1f + (ZapRopeEndScale - 1f) * life;
+                var samples = SampleSpline();
+
+                if (rope.Count == 0)
                 {
-                    if (i < crackle.Count)
+                    for (int i = 0; i < samples.Length - 1; i++)
                     {
-                        var c = crackle[i].Value;
-                        if (c != null && c.IsValid)
-                        {
-                            if (crackling)
-                                MoveBeam(c, points[i], points[i + 1], CrackleColor(i, crackleFade));
-                            else
-                                c.Remove();
-                        }
+                        var beam = CreateBeam(samples[i], samples[i + 1], color.Color, 1f);
+                        if (beam != null) rope.Add(HandleOf(beam));
                     }
+                }
 
-                    if (i < wire.Count)
-                    {
-                        var w = wire[i].Value;
-                        if (w != null && w.IsValid)
-                            MoveBeam(w, points[i], points[i + 1], WireColor(i, wireFade));
-                    }
+                for (int i = 0; i < rope.Count && i < samples.Length - 1; i++)
+                {
+                    var beam = rope[i].Value;
+                    if (beam == null || !beam.IsValid) continue;
+
+                    float u0 = i / (float)(samples.Length - 1);
+                    float u1 = (i + 1) / (float)(samples.Length - 1);
+                    float flicker = 0.7f + plugin.rng.NextSingle() * 0.3f;
+
+                    beam.Teleport(samples[i], Vector3.Zero, Vector3.Zero);
+                    SetBeamEnd(beam, samples[i + 1], true);
+                    beam.Width = RopeWidth(u0) * widthScale;
+                    beam.EndWidth = RopeWidth(u1) * widthScale;
+                    beam.Render = Scale(Whiten(color.Color, 0.25f), fade * flicker);
+                    Utilities.SetStateChanged(beam, "CBeam", "m_fWidth");
+                    Utilities.SetStateChanged(beam, "CBeam", "m_fEndWidth");
+                    Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
                 }
 
                 return true;
@@ -299,36 +321,65 @@ namespace ZeusOnlyMode
 
             public void Destroy()
             {
-                foreach (var beam in crackle) RemoveEntity(beam);
-                foreach (var beam in wire) RemoveEntity(beam);
+                foreach (var beam in rope) RemoveEntity(beam);
             }
 
-            // Sag grows like a falling rope, strongest mid-span and pinned at
-            // both ends, so the wire stays a smooth curve as it drops
-            private Vector3[] PointsAt(float age)
+            // Carrier wire physics, per the stock operators
+            private void Simulate(float age, float dt)
             {
-                float sag = Math.Min(0.5f * gravity * age * age, ZapMaxSag);
-                var points = new Vector3[ZapWireSegments + 1];
-                for (int i = 0; i <= ZapWireSegments; i++)
+                if (dt <= 0f)
+                    return;
+
+                float dampen = age < ZapDampenFadeStart ? 1f
+                    : age < ZapDampenFadeEnd ? 1f - (age - ZapDampenFadeStart) / (ZapDampenFadeEnd - ZapDampenFadeStart)
+                    : 0f;
+
+                for (int i = 0; i < ZapWirePoints; i++)
                 {
-                    float weight = MathF.Sin(i / (float)ZapWireSegments * MathF.PI);
-                    points[i] = basePoints[i] + bulge[i] - new Vector3(0f, 0f, sag * weight);
+                    if (locked[i])
+                        continue;
+
+                    velocities[i].Z -= gravity * dt;
+                    velocities[i] *= Math.Max(0f, 1f - ZapDrag * dt * 30f);
+
+                    float nearEnd = Math.Min(Vector3.Distance(points[i], start), Vector3.Distance(points[i], end));
+                    float damped = ZapDampenScale + (1f - ZapDampenScale) * Math.Clamp(nearEnd / ZapDampenRange, 0f, 1f);
+                    float factor = 1f + (damped - 1f) * dampen;
+
+                    points[i] += velocities[i] * dt * factor;
+                    if (points[i].Z < floorZ)
+                    {
+                        points[i].Z = floorZ;
+                        velocities[i] = Vector3.Zero;
+                    }
                 }
-                return points;
             }
 
-            // Additive beams fade by scaling toward black
-            private Color CrackleColor(int segment, float fade) => Scale(Whiten(color.Color, 0.35f), fade);
-
-            private Color WireColor(int segment, float fade) => Scale(color.Color, 0.45f * fade);
-
-            private static void MoveBeam(CBeam beam, Vector3 start, Vector3 end, Color color)
+            // Catmull-Rom through the carrier points, so the rope is a smooth curve
+            private Vector3[] SampleSpline()
             {
-                beam.Teleport(start, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(beam, end, true);
-                beam.Render = color;
-                Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
+                var samples = new Vector3[(ZapWirePoints - 1) * ZapSubdivisions + 1];
+                int n = 0;
+                for (int i = 0; i < ZapWirePoints - 1; i++)
+                {
+                    var p0 = points[Math.Max(i - 1, 0)];
+                    var p1 = points[i];
+                    var p2 = points[i + 1];
+                    var p3 = points[Math.Min(i + 2, ZapWirePoints - 1)];
+                    for (int s = 0; s < ZapSubdivisions; s++)
+                    {
+                        float t = s / (float)ZapSubdivisions;
+                        float t2 = t * t, t3 = t2 * t;
+                        samples[n++] = 0.5f * (2f * p1 + (p2 - p0) * t + (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2 + (3f * p1 - p0 - 3f * p2 + p3) * t3);
+                    }
+                }
+                samples[n] = points[ZapWirePoints - 1];
+                return samples;
             }
+
+            // Thickest mid-span, thin at the gun and at the probe
+            private static float RopeWidth(float u) =>
+                ZapRopePeakWidth * (0.25f + 0.75f * MathF.Sin(u * MathF.PI));
         }
 
         private void UpdateColorZaps()
@@ -407,7 +458,7 @@ namespace ZeusOnlyMode
         // after the last press. It never reads chat numbers or clears the
         // center panel, so other plugins' menus keep working as they do.
 
-        private void OnZeusColorButtons(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
+        private void OnZeusColorButtons(CCSPlayerController player, PlayerButtons pressed)
         {
             bool reload = (pressed & PlayerButtons.Reload) != 0;
             bool inspect = (pressed & PlayerButtons.Inspect) != 0;
@@ -478,7 +529,7 @@ namespace ZeusOnlyMode
                     sb.Append($"<br><font color='{hex}'>{option.Name}</font>");
             }
 
-            sb.Append("<br><font color='#9E9E9E'>R: Next   F: Previous</font>");
+            sb.Append("<br><font color='#9E9E9E'>Reload: Next   Inspect: Previous</font>");
             return sb.ToString();
         }
 

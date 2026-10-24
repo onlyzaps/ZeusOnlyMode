@@ -95,8 +95,9 @@ namespace ZeusOnlyMode
             AddCommandListener("say", OnSuperZeusChat);
             AddCommandListener("say_team", OnSuperZeusChat);
 
-            RegisterListener<Listeners.OnPlayerButtonsChanged>(OnSuperZeusButtons);
+            RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
+            RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
             {
                 foreach (var resource in SuperZeusResources)
@@ -107,6 +108,7 @@ namespace ZeusOnlyMode
                 lightningBalls.Clear();
                 ballSparks.Clear();
                 nextBallTime.Clear();
+                lastButtons.Clear();
                 pendingRecharges.Clear();
                 taserRechargeCvar = null;
             });
@@ -173,7 +175,36 @@ namespace ZeusOnlyMode
                 player.PrintToChat(message);
         }
 
-        private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
+        // Button presses are read straight off each pawn every tick instead
+        // of through the OnPlayerButtonsChanged listener, so the alt-fire and
+        // the color menu each reliably see every press
+        private readonly Dictionary<int, PlayerButtons> lastButtons = new();
+
+        private void PollButtons()
+        {
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player == null || !player.IsValid || player.IsBot)
+                    continue;
+
+                var movement = player.Pawn.Value?.MovementServices;
+                if (movement == null)
+                    continue;
+
+                var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
+                lastButtons.TryGetValue(player.Slot, out var previous);
+                lastButtons[player.Slot] = buttons;
+
+                var pressed = buttons & ~previous;
+                if (pressed == 0)
+                    continue;
+
+                OnSuperZeusButtons(player, pressed);
+                OnZeusColorButtons(player, pressed);
+            }
+        }
+
+        private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed)
         {
             if (!superZeusEnabled || (pressed & PlayerButtons.Attack2) == 0)
                 return;
@@ -317,14 +348,14 @@ namespace ZeusOnlyMode
             {
                 // Colored rays taper to a point so they read as soft glow, not lines
                 var arc = colored
-                    ? CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 2.5f : 3.5f, 0f)
+                    ? CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 2.5f : 3.5f, 0.4f)
                     : CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 1.2f : 2.4f);
                 if (arc != null) ball.Arcs.Add(HandleOf(arc));
             }
 
             if (colored)
             {
-                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 4f, 0f);
+                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 4f, 0.4f);
                 if (tail != null) ball.Tail = HandleOf(tail);
             }
 
@@ -588,7 +619,7 @@ namespace ZeusOnlyMode
                 var vel = ball.Velocity * 0.1f + RandomUnit() * (140f + rng.NextSingle() * 260f) + new Vector3(0f, 0f, 60f);
                 var color = ball.Color!.Color;
 
-                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.1f);
+                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.2f);
                 if (beam == null) return;
 
                 float now = Server.CurrentTime;
