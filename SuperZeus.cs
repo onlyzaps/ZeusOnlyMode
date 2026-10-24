@@ -78,7 +78,6 @@ namespace ZeusOnlyMode
         {
             public required CHandle<CDecoyProjectile> Projectile;
             public CHandle<CParticleSystem>? Core;
-            public CHandle<COmniLight>? Light;
             public CHandle<CBeam>? Tail;
             public readonly List<CHandle<CBeam>> Arcs = new();
             public required int OwnerSlot;
@@ -347,22 +346,20 @@ namespace ZeusOnlyMode
                 if (core != null) ball.Core = HandleOf(core);
             }
 
-            var light = SpawnBallLight(spawnPos, BoltGlowColor(ball.Color));
-            if (light != null) ball.Light = HandleOf(light);
 
             int arcCount = colored ? ColoredBallRays : 4;
             for (int i = 0; i < arcCount; i++)
             {
                 // Colored rays taper to a point so they read as soft glow, not lines
                 var arc = colored
-                    ? CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 2.5f : 3.5f, 0.4f)
-                    : CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 1.2f : 2.4f);
+                    ? CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 0.6f : 0.9f, 0.1f)
+                    : CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), i % 2 == 0 ? 0.4f : 0.8f);
                 if (arc != null) ball.Arcs.Add(HandleOf(arc));
             }
 
             if (colored)
             {
-                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 1f, 0.1f);
+                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 0.5f, 0.05f);
                 if (tail != null) ball.Tail = HandleOf(tail);
             }
 
@@ -419,7 +416,15 @@ namespace ZeusOnlyMode
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
-                if (!UpdateLightningBall(lightningBalls[i]))
+                bool alive;
+                try { alive = UpdateLightningBall(lightningBalls[i]); }
+                catch (Exception ex)
+                {
+                    Logger.LogError("[SuperZeus] Ball update failed: {Error}", ex);
+                    alive = false;
+                }
+
+                if (!alive)
                 {
                     DestroyLightningBall(lightningBalls[i]);
                     lightningBalls.RemoveAt(i);
@@ -473,7 +478,6 @@ namespace ZeusOnlyMode
             var angles = DirectionToAngles(ball.Velocity);
             ball.Core?.Value?.Teleport(pos, angles, Vector3.Zero);
 
-            ball.Light?.Value?.Teleport(pos, Vector3.Zero, Vector3.Zero);
 
             // Re-roll the arcs every tick so the ball constantly writhes; a
             // colored ball's soft rays stay short so they read as a glow
@@ -588,18 +592,6 @@ namespace ZeusOnlyMode
                 return;
 
             var chest = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, 40f);
-            var sky = chest + new Vector3((rng.NextSingle() - 0.5f) * 120f, (rng.NextSingle() - 0.5f) * 120f, 620f);
-            var color = ball.Color;
-
-            // Two quick strokes with different shapes read as a flickering strike
-            DrawLightningBolt(sky, chest, 0.12f, color, 1f, true);
-            AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f, color, 1f, true), TimerFlags.STOP_ON_MAPCHANGE);
-
-            ImpactBurst(chest);
-            SpawnParticle(FxImpactFlare, sky, Vector3.Zero, 1f);
-
-            pawn.EmitSound("Player.DeathTaser");
-            pawn.EmitSound("Flashbang.Explode");
 
             // Fling the body along the ball's path: velocity set BEFORE death is
             // inherited by the ragdoll, and the ragdoll impulse stamped right
@@ -609,17 +601,63 @@ namespace ZeusOnlyMode
             var dir = flat.LengthSquared() < 1f ? Vector3.UnitX : Vector3.Normalize(flat);
             var launch = dir * RagdollLaunchSpeed + new Vector3(0f, 0f, RagdollLaunchSpeed * 0.3f);
 
+            // The kill comes first, so nothing cosmetic below can ever stop it
             pawn.Teleport(null, null, (Vector3?)launch);
-            pawn.CommitSuicide(false, true);
+            bool killed = KillPawn(pawn);
+            Logger.LogInformation("[SuperZeus] Strike on {Name}: {Result}",
+                victim.PlayerName, killed ? "killed" : "STILL ALIVE after both kill attempts");
 
-            pawn.RagdollDamageForce.X = launch.X * 100f;
-            pawn.RagdollDamageForce.Y = launch.Y * 100f;
-            pawn.RagdollDamageForce.Z = launch.Z * 100f;
-            pawn.RagdollDamagePosition.X = chest.X;
-            pawn.RagdollDamagePosition.Y = chest.Y;
-            pawn.RagdollDamagePosition.Z = chest.Z;
-            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
-            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamagePosition");
+            try
+            {
+                pawn.RagdollDamageForce.X = launch.X * 100f;
+                pawn.RagdollDamageForce.Y = launch.Y * 100f;
+                pawn.RagdollDamageForce.Z = launch.Z * 100f;
+                pawn.RagdollDamagePosition.X = chest.X;
+                pawn.RagdollDamagePosition.Y = chest.Y;
+                pawn.RagdollDamagePosition.Z = chest.Z;
+                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
+                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamagePosition");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message);
+            }
+
+            try
+            {
+                var sky = chest + new Vector3((rng.NextSingle() - 0.5f) * 120f, (rng.NextSingle() - 0.5f) * 120f, 620f);
+                var color = ball.Color;
+
+                // Two quick strokes with different shapes read as a flickering strike
+                DrawLightningBolt(sky, chest, 0.12f, color, 1f, true);
+                AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f, color, 1f, true), TimerFlags.STOP_ON_MAPCHANGE);
+
+                ImpactBurst(chest);
+                SpawnParticle(FxImpactFlare, sky, Vector3.Zero, 1f);
+
+                pawn.EmitSound("Player.DeathTaser");
+                pawn.EmitSound("Flashbang.Explode");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] Strike effects failed: {Message}", ex.Message);
+            }
+        }
+
+        // Forced suicide; if the pawn is somehow still alive, fall back to the
+        // SetHealth input, which applies real damage through the normal death path
+        private bool KillPawn(CCSPlayerPawn pawn)
+        {
+            try { pawn.CommitSuicide(false, true); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] CommitSuicide failed: {Message}", ex.Message); }
+
+            if (pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
+                return true;
+
+            try { pawn.AcceptInput("SetHealth", pawn, pawn, "0"); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] SetHealth failed: {Message}", ex.Message); }
+
+            return pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
         }
 
         private void WallBurst(Vector3 pos)
@@ -826,25 +864,6 @@ namespace ZeusOnlyMode
                 Utilities.SetStateChanged(beam, "CBeam", "m_vecEndPos");
         }
 
-        private static COmniLight? SpawnBallLight(Vector3 pos, Color color)
-        {
-            var light = Utilities.CreateEntityByName<COmniLight>("light_omni2");
-            if (light == null)
-                return null;
-
-            light.Enabled = true;
-            light.DirectLight = 3; // dynamic
-            light.CastShadows = 0;
-            light.Color = color;
-            light.Brightness = 0.06f;
-            light.Range = 90f;
-            light.InnerAngle = 180f;
-            light.OuterAngle = 180f;
-            light.Teleport(pos, Vector3.Zero, Vector3.Zero);
-            light.DispatchSpawn();
-            return light;
-        }
-
         // lifetime <= 0 means the caller owns cleanup
         private CParticleSystem? SpawnParticle(string effect, Vector3 pos, Vector3 angles, float lifetime, CBaseEntity? parent = null)
         {
@@ -870,7 +889,6 @@ namespace ZeusOnlyMode
         {
             RemoveEntity(ball.Projectile);
             if (ball.Core != null) RemoveEntity(ball.Core);
-            if (ball.Light != null) RemoveEntity(ball.Light);
             if (ball.Tail != null) RemoveEntity(ball.Tail);
             foreach (var arc in ball.Arcs)
                 RemoveEntity(arc);
