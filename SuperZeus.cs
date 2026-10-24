@@ -22,12 +22,17 @@ namespace ZeusOnlyMode
         private const float BallSpeed = 1500f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
-        private const float BallHitRadius = 36f;
+        private const float BallOrbRadius = 12f;     // hit size: the visible center orb
+        private const float PlayerHullRadius = 16f;  // half of the 32-unit player hull
+        private const float PlayerHullHeight = 72f;
         private const float BallTickLookahead = 1f / 64f; // one server tick of travel
 
         // How hard a lightning ball kill flings the enemy's ragdoll
         // (horizontal speed along the ball's path, plus 30% of it upward)
         private const float RagdollLaunchSpeed = 2400f;
+
+        // Damage per lightning ball hit (a little over a third of full health)
+        private const int BallDamage = 34;
 
         // All effects below exist in CS2's pak01 and only rely on control point 0,
         // so they render correctly from a plain info_particle_system.
@@ -110,6 +115,7 @@ namespace ZeusOnlyMode
             AddCommandListener("say_team", OnSuperZeusChat);
 
             RegisterListener<Listeners.OnTick>(PollButtons);
+            RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
@@ -121,6 +127,8 @@ namespace ZeusOnlyMode
             {
                 lightningBalls.Clear();
                 ballSparks.Clear();
+                bodyZaps.Clear();
+                pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
                 pendingRecharges.Clear();
@@ -430,6 +438,9 @@ namespace ZeusOnlyMode
             if (ballSparks.Count > 0)
                 UpdateBallSparks();
 
+            if (bodyZaps.Count > 0)
+                UpdateBodyZaps();
+
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
                 bool alive;
@@ -540,9 +551,13 @@ namespace ZeusOnlyMode
                 ball.OwnerSlot, ball.OwnerTeam, outcome, nearest);
         }
 
-        // Any living player (other than the shooter) the ball passed through this tick
+        // Any living player (other than the shooter) whose body the ball's
+        // center orb touched along this tick's path. The body is a capsule the
+        // size of the player hull; the orb is a sphere of BallOrbRadius.
         private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to)
         {
+            const float reach = BallOrbRadius + PlayerHullRadius;
+
             foreach (var player in Utilities.GetPlayers())
             {
                 if (player == null || !player.IsValid || !player.PawnIsAlive || player.Slot == ball.OwnerSlot)
@@ -552,18 +567,54 @@ namespace ZeusOnlyMode
                 if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
                     continue;
 
-                // Treat the player as an upright capsule and test it against this tick's travel segment
                 var feet = ToVec3(pawn.AbsOrigin);
-                var closest = ClosestPointOnSegment(from, to, feet + new Vector3(0, 0, 36f));
-                float dx = closest.X - feet.X;
-                float dy = closest.Y - feet.Y;
+                var axisLow = feet + new Vector3(0, 0, PlayerHullRadius);
+                var axisHigh = feet + new Vector3(0, 0, PlayerHullHeight - PlayerHullRadius);
 
-                if (dx * dx + dy * dy <= BallHitRadius * BallHitRadius
-                    && closest.Z >= feet.Z - 16f && closest.Z <= feet.Z + 88f)
+                if (SegmentDistanceSquared(from, to, axisLow, axisHigh) <= reach * reach)
                     return player;
             }
 
             return null;
+        }
+
+        // Squared distance between the closest points of segments p1-q1 and p2-q2
+        private static float SegmentDistanceSquared(Vector3 p1, Vector3 q1, Vector3 p2, Vector3 q2)
+        {
+            var d1 = q1 - p1;
+            var d2 = q2 - p2;
+            var r = p1 - p2;
+            float a = Vector3.Dot(d1, d1), e = Vector3.Dot(d2, d2), f = Vector3.Dot(d2, r);
+            float s, t;
+
+            if (a < 1e-6f && e < 1e-6f)
+                return r.LengthSquared();
+
+            if (a < 1e-6f)
+            {
+                s = 0f;
+                t = Math.Clamp(f / e, 0f, 1f);
+            }
+            else
+            {
+                float c = Vector3.Dot(d1, r);
+                if (e < 1e-6f)
+                {
+                    t = 0f;
+                    s = Math.Clamp(-c / a, 0f, 1f);
+                }
+                else
+                {
+                    float b = Vector3.Dot(d1, d2);
+                    float denom = a * e - b * b;
+                    s = denom > 1e-6f ? Math.Clamp((b * f - c * e) / denom, 0f, 1f) : 0f;
+                    t = (b * s + f) / e;
+                    if (t < 0f) { t = 0f; s = Math.Clamp(-c / a, 0f, 1f); }
+                    else if (t > 1f) { t = 1f; s = Math.Clamp((b - c) / a, 0f, 1f); }
+                }
+            }
+
+            return ((p1 + d1 * s) - (p2 + d2 * t)).LengthSquared();
         }
 
         private void StrikeVictim(CCSPlayerController victim, LightningBall ball)
@@ -572,50 +623,127 @@ namespace ZeusOnlyMode
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
                 return;
 
-            var chest = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, 40f);
+            var feet = ToVec3(pawn.AbsOrigin);
+            var chest = feet + new Vector3(0, 0, 40f);
+            var shooterPawn = Utilities.GetPlayerFromSlot(ball.OwnerSlot)?.PlayerPawn.Value;
 
-            // Fling the body along the ball's path: velocity set BEFORE death is
-            // inherited by the ragdoll, and the ragdoll impulse stamped right
-            // after (same tick, so the client gets both with the death) throws
-            // the client-side ragdoll.
+            // Fling a body the hit is about to kill along the ball's path:
+            // velocity set BEFORE death is inherited by the ragdoll, and the
+            // ragdoll impulse stamped right after throws the client ragdoll
             var flat = new Vector3(ball.Velocity.X, ball.Velocity.Y, 0f);
             var dir = flat.LengthSquared() < 1f ? Vector3.UnitX : Vector3.Normalize(flat);
             var launch = dir * RagdollLaunchSpeed + new Vector3(0f, 0f, RagdollLaunchSpeed * 0.3f);
 
-            // The kill comes first, so nothing cosmetic below can ever stop it
-            pawn.Teleport(null, null, (Vector3?)launch);
-            bool killed = KillPawn(pawn);
-            Logger.LogInformation("[SuperZeus] Strike on {Name}: {Result}",
-                victim.PlayerName, killed ? "killed" : "STILL ALIVE after both kill attempts");
+            int before = pawn.Health;
+            if (before <= BallDamage)
+                pawn.Teleport(null, null, (Vector3?)launch);
+
+            // Damage comes first, so nothing cosmetic below can ever stop it.
+            // While it's applied, OnBallDamagePre puts the launch on the damage
+            // itself, which is what the game builds the ragdoll's throw from.
+            pendingBallForces[pawn.Index] = (launch, chest);
+            ballForceApplied = false;
+            try { DamagePawn(pawn, shooterPawn, chest, before); }
+            finally { pendingBallForces.Remove(pawn.Index); }
+            bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
+            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (launch force {Force})",
+                victim.PlayerName, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
+                ballForceApplied ? "applied" : "not applied");
+
+            if (killed)
+            {
+                try { StampRagdollImpulse(pawn, launch); }
+                catch (Exception ex) { Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message); }
+            }
 
             try
             {
-                StampRagdollImpulse(pawn, launch);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message);
-            }
-
-            try
-            {
-                var sky = chest + new Vector3((rng.NextSingle() - 0.5f) * 120f, (rng.NextSingle() - 0.5f) * 120f, 620f);
-                var color = ball.Color;
-
-                // Two quick strokes with different shapes read as a flickering strike
-                DrawLightningBolt(sky, chest, 0.12f, color, 1f, true);
-                AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f, color, 1f, true), TimerFlags.STOP_ON_MAPCHANGE);
+                if (killed)
+                    StartBodyZap(feet, launch, ball.Color, null, BodyZapLife);
+                else
+                    StartBodyZap(feet, Vector3.Zero, ball.Color, HandleOf(pawn), BodyZapHitLife);
 
                 ImpactBurst(chest);
-                SpawnParticle(FxImpactFlare, sky, Vector3.Zero, 1f);
-
-                pawn.EmitSound("Player.DeathTaser");
-                pawn.EmitSound("Flashbang.Explode");
+                pawn.EmitSound(killed ? "Player.DeathTaser" : "Weapon_Taser.Hit");
             }
             catch (Exception ex)
             {
-                Logger.LogError("[SuperZeus] Strike effects failed: {Message}", ex.Message);
+                Logger.LogError("[SuperZeus] Hit effects failed: {Message}", ex.Message);
             }
+        }
+
+        // Launch force for the damage a ball is applying right now, by pawn index
+        private readonly Dictionary<uint, (Vector3 Launch, Vector3 At)> pendingBallForces = new();
+        private bool ballForceApplied;
+
+        // The game sets the ragdoll's throw from the force on the damage that
+        // kills: putting the ball's launch here (as an impulse, ~100x the
+        // velocity) is what actually sends the body flying
+        private HookResult OnBallDamagePre(CBaseEntity entity, CTakeDamageInfo info)
+        {
+            if (pendingBallForces.Count == 0 || entity == null || !entity.IsValid
+                || !pendingBallForces.TryGetValue(entity.Index, out var pending))
+                return HookResult.Continue;
+
+            var direction = Vector3.Normalize(pending.Launch);
+            info.DamageForce.X = pending.Launch.X * 100f;
+            info.DamageForce.Y = pending.Launch.Y * 100f;
+            info.DamageForce.Z = pending.Launch.Z * 100f;
+            info.DamagePosition.X = pending.At.X;
+            info.DamagePosition.Y = pending.At.Y;
+            info.DamagePosition.Z = pending.At.Z;
+            info.DamageDirection.X = direction.X;
+            info.DamageDirection.Y = direction.Y;
+            info.DamageDirection.Z = direction.Z;
+            ballForceApplied = true;
+            return HookResult.Continue;
+        }
+
+        // 34 shock damage credited to the shooter, applied by a point_hurt aimed
+        // at the victim so it goes through the game's normal damage and death
+        // handling. If that has no effect, health is lowered directly (and the
+        // forced kill used when it would reach zero).
+        private void DamagePawn(CCSPlayerPawn pawn, CCSPlayerPawn? attacker, Vector3 at, int before)
+        {
+            try
+            {
+                var hurt = Utilities.CreateEntityByName<CPointHurt>("point_hurt");
+                var identity = pawn.Entity;
+                if (hurt != null && identity != null)
+                {
+                    string previousName = identity.Name;
+                    string targetName = $"zeusball_target_{pawn.Index}";
+                    identity.Name = targetName;
+
+                    hurt.Damage = BallDamage;
+                    hurt.BitsDamageType = DamageTypes_t.DMG_SHOCK;
+                    hurt.StrTarget = targetName;
+                    hurt.Teleport(at, Vector3.Zero, Vector3.Zero);
+                    hurt.DispatchSpawn();
+                    hurt.AcceptInput("Hurt", attacker ?? (CEntityInstance)pawn, attacker ?? (CEntityInstance)pawn);
+                    hurt.Remove();
+
+                    if (pawn.IsValid)
+                        identity.Name = previousName;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] point_hurt damage failed: {Message}", ex.Message);
+            }
+
+            if (!pawn.IsValid || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE || pawn.Health < before)
+                return;
+
+            int remaining = before - BallDamage;
+            if (remaining <= 0)
+            {
+                KillPawn(pawn);
+                return;
+            }
+
+            pawn.Health = remaining;
+            Utilities.SetStateChanged(pawn, "CBaseEntity", "m_iHealth");
         }
 
         // Kept in its own non-inlined method on purpose: schema fields come and
@@ -846,57 +974,168 @@ namespace ZeusOnlyMode
             ballSparks.Clear();
         }
 
-        // Jagged multi-segment bolt: a wide glow beam with a hot core beam on
-        // top, plus optional side branches. scale shrinks it for zaps.
-        private void DrawLightningBolt(Vector3 start, Vector3 end, float lifetime, ZeusColorOption? color, float scale, bool branches)
-        {
-            var beams = new List<CHandle<CBeam>>();
+        // --- Body zap ------------------------------------------------------
+        //
+        // A colored take on the stock taser death crackle (taser_body_fx, which
+        // needs the body's model snapshot and can't be spawned by a plugin):
+        // short jagged arcs crawling over a player-sized capsule, re-striking
+        // every tick. The ragdoll is simulated on the client, so the capsule
+        // follows the body's expected flight from the launch velocity, with
+        // gravity, and settles on the floor it died on.
 
-            int segments = Math.Max(4, (int)(Vector3.Distance(start, end) / 55f));
-            var trunk = JaggedPath(start, end, Math.Min(segments, 12), 26f * scale);
-            for (int i = 0; i < trunk.Count - 1; i++)
+        private const int BodyZapArcs = 5;
+        private const int BodyZapSegments = 3;
+        private const float BodyZapLife = 0.9f;      // on a kill
+        private const float BodyZapHitLife = 0.5f;   // on a survivor
+        private const float BodyZapFade = 0.3f;
+        private const float BodyGravity = 800f;
+        private const float BodyGroundFriction = 6f;
+
+        private sealed class BodyZap
+        {
+            public required ZeusColorOption? Color;
+            public required float FloorZ;
+            public required float Born;
+            public required float Life;
+            public CHandle<CCSPlayerPawn>? Follow;     // a living victim to stay on
+            public Vector3 Center;
+            public Vector3 Velocity;
+            public float LastUpdate;
+            public readonly List<CHandle<CBeam>> Glow = new();
+            public readonly List<CHandle<CBeam>> Line = new();
+        }
+
+        private readonly List<BodyZap> bodyZaps = new();
+
+        private void StartBodyZap(Vector3 feet, Vector3 launch, ZeusColorOption? color, CHandle<CCSPlayerPawn>? follow, float life)
+        {
+            float now = Server.CurrentTime;
+            var zap = new BodyZap
             {
-                float t = i / (float)trunk.Count;
-                AddBeam(beams, trunk[i], trunk[i + 1], BoltGlowColor(color), 9f * scale);
-                AddBeam(beams, trunk[i], trunk[i + 1], BoltCoreColor(color), 3f * scale);
+                Color = color,
+                FloorZ = feet.Z + PlayerHullRadius,
+                Born = now,
+                Life = life,
+                Follow = follow,
+                Center = feet + new Vector3(0, 0, PlayerHullHeight * 0.5f),
+                Velocity = launch,
+                LastUpdate = now
+            };
+
+            for (int i = 0; i < BodyZapArcs * BodyZapSegments; i++)
+            {
+                var glow = CreateBeam(zap.Center, zap.Center, Scale(BoltGlowColor(color), 0.45f), 1.0f, 0.4f);
+                if (glow != null) zap.Glow.Add(HandleOf(glow));
+                var line = CreateBeam(zap.Center, zap.Center, Whiten(BoltGlowColor(color), 0.4f), 0.3f, 0.1f);
+                if (line != null) zap.Line.Add(HandleOf(line));
             }
 
-            if (branches && trunk.Count > 5)
+            bodyZaps.Add(zap);
+            UpdateBodyZap(zap);
+        }
+
+        private void UpdateBodyZaps()
+        {
+            for (int i = bodyZaps.Count - 1; i >= 0; i--)
             {
-                for (int b = 0; b < 3; b++)
+                if (!UpdateBodyZap(bodyZaps[i]))
                 {
-                    var origin = trunk[2 + rng.Next(trunk.Count - 5)];
-                    var dir = Vector3.Normalize(RandomUnit() + new Vector3(0, 0, -1.2f));
-                    var branch = JaggedPath(origin, origin + dir * (70f + rng.NextSingle() * 90f), 4, 14f);
-                    for (int i = 0; i < branch.Count - 1; i++)
-                        AddBeam(beams, branch[i], branch[i + 1], BoltGlowColor(color), 3f);
+                    DestroyBodyZap(bodyZaps[i]);
+                    bodyZaps.RemoveAt(i);
+                }
+            }
+        }
+
+        // Returns false once the crackle has faded
+        private bool UpdateBodyZap(BodyZap zap)
+        {
+            float now = Server.CurrentTime;
+            float age = now - zap.Born;
+            if (age >= zap.Life)
+                return false;
+
+            float dt = now - zap.LastUpdate;
+            zap.LastUpdate = now;
+
+            var followed = zap.Follow?.Value;
+            if (followed != null && followed.IsValid && followed.AbsOrigin != null)
+            {
+                // A survivor: stay on them as they move
+                zap.Center = ToVec3(followed.AbsOrigin) + new Vector3(0, 0, PlayerHullHeight * 0.5f);
+            }
+            else
+            {
+                // A kill: follow the body's expected flight, ballistic and then
+                // sliding to a stop once it reaches the floor
+                zap.Velocity.Z -= BodyGravity * dt;
+                zap.Center += zap.Velocity * dt;
+                if (zap.Center.Z <= zap.FloorZ)
+                {
+                    zap.Center.Z = zap.FloorZ;
+                    zap.Velocity.Z = 0f;
+                    zap.Velocity *= Math.Max(0f, 1f - BodyGroundFriction * dt);
                 }
             }
 
-            AddTimer(lifetime, () =>
+            float fade = Math.Clamp((zap.Life - age) / BodyZapFade, 0f, 1f);
+            var glowColor = Scale(BoltGlowColor(zap.Color), 0.45f * fade);
+            var lineColor = Scale(Whiten(BoltGlowColor(zap.Color), 0.4f), fade);
+
+            int beam = 0;
+            for (int arc = 0; arc < BodyZapArcs; arc++)
             {
-                foreach (var beam in beams)
-                    RemoveEntity(beam);
-            }, TimerFlags.STOP_ON_MAPCHANGE);
+                var points = BodyArcPoints(zap.Center);
+                for (int s = 0; s < BodyZapSegments; s++, beam++)
+                {
+                    if (beam < zap.Glow.Count) MoveColoredBeam(zap.Glow[beam], points[s], points[s + 1], glowColor);
+                    if (beam < zap.Line.Count) MoveColoredBeam(zap.Line[beam], points[s], points[s + 1], lineColor);
+                }
+            }
+
+            return true;
         }
 
-        private List<Vector3> JaggedPath(Vector3 start, Vector3 end, int segments, float jitter)
+        // A short arc hugging the body: it starts on the capsule surface and
+        // crawls part of the way around it, with jagged midpoints
+        private Vector3[] BodyArcPoints(Vector3 center)
         {
-            var points = new List<Vector3> { start };
-            for (int i = 1; i < segments; i++)
+            float angle = rng.NextSingle() * MathF.PI * 2f;
+            float sweep = (0.8f + rng.NextSingle()) * (rng.NextSingle() < 0.5f ? -1f : 1f);
+            float height = (rng.NextSingle() - 0.5f) * (PlayerHullHeight - 8f);
+            float climb = (rng.NextSingle() - 0.5f) * 24f;
+
+            var points = new Vector3[BodyZapSegments + 1];
+            for (int i = 0; i <= BodyZapSegments; i++)
             {
-                float t = (float)i / segments;
-                points.Add(Vector3.Lerp(start, end, t) + RandomUnit() * jitter * (rng.NextSingle() * 0.5f + 0.5f));
+                float t = i / (float)BodyZapSegments;
+                float a = angle + sweep * t;
+                float radius = PlayerHullRadius * (0.7f + rng.NextSingle() * 0.4f);
+                points[i] = center + new Vector3(MathF.Cos(a) * radius, MathF.Sin(a) * radius, height + climb * t);
             }
-            points.Add(end);
             return points;
         }
 
-        private void AddBeam(List<CHandle<CBeam>> list, Vector3 start, Vector3 end, Color color, float width)
+        private static void MoveColoredBeam(CHandle<CBeam> handle, Vector3 start, Vector3 end, Color color)
         {
-            var beam = CreateBeam(start, end, color, width);
-            if (beam != null)
-                list.Add(HandleOf(beam));
+            var beam = handle.Value;
+            if (beam == null || !beam.IsValid) return;
+            beam.Teleport(start, Vector3.Zero, Vector3.Zero);
+            SetBeamEnd(beam, end, true);
+            beam.Render = color;
+            Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
+        }
+
+        private static void DestroyBodyZap(BodyZap zap)
+        {
+            foreach (var beam in zap.Glow) RemoveEntity(beam);
+            foreach (var beam in zap.Line) RemoveEntity(beam);
+        }
+
+        private void ClearBodyZaps()
+        {
+            foreach (var zap in bodyZaps)
+                DestroyBodyZap(zap);
+            bodyZaps.Clear();
         }
 
         // endWidth below width tapers the beam (0 = to a point)
@@ -964,6 +1203,7 @@ namespace ZeusOnlyMode
                 DestroyLightningBall(ball);
             lightningBalls.Clear();
             ClearBallSparks();
+            ClearBodyZaps();
         }
 
         // Handles survive round restarts safely, unlike raw entity references held across ticks

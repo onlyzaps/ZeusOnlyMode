@@ -16,9 +16,8 @@ Super Zeus
 Admins (@css/generic) can type superzeus in console, or superzeus / !superzeus / /superzeus in chat,
 to toggle Super Zeus. The chat message is never shown to players. Add 1 or 0 to force it on or off.
 
-While Super Zeus is on, any player can right-click with the Zeus to hurl an insta-kill lightning
-ball. It costs the same charge as a normal zap, so it shares the Zeus's recharge. Enemies it hits
-are killed and their ragdolls launched across the map; teammates are never hurt, and the ball
+While Super Zeus is on, any player can right-click with the Zeus to hurl a lightning
+ball. It costs the same charge as a normal zap, so it shares the Zeus's recharge. Enemies it hits take 34 damage, and bodies it kills are launched across the map; teammates are never hurt, and the ball
 dissipates on them like it hit a wall. It explodes on walls and fizzles out after 2.5 seconds.
 Super Zeus works with or without Zeus Only Mode.
 

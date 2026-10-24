@@ -37,7 +37,7 @@ namespace ZeusOnlyMode
         };
 
         private const int ColorMenuWindow = 2;        // colors shown above / below the selection
-        private const float ColorMenuIdleSeconds = 4f;  // panel hides this long after the last press
+        private const float ColorMenuIdleSeconds = 2.5f; // panel hides this long after the last press
 
         private sealed class ZeusColorPrefs
         {
@@ -532,7 +532,7 @@ namespace ZeusOnlyMode
                     sb.Append($"<br><font color='{hex}'>{option.Name}</font>");
             }
 
-            sb.Append("<br><font color='#9E9E9E'>Reload: Next   Inspect: Previous</font>");
+            sb.Append("<br><font color='#9E9E9E'>Reload: Next | Inspect: Previous</font>");
             return sb.ToString();
         }
 
