@@ -641,12 +641,12 @@ namespace ZeusOnlyMode
             // Damage comes first, so nothing cosmetic below can ever stop it.
             // While it's applied, OnBallDamagePre puts the launch on the damage
             // itself, which is what the game builds the ragdoll's throw from.
-            pendingBallForces[pawn.Index] = (launch, chest);
+            pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
             ballForceApplied = false;
             try { DamagePawn(pawn, shooterPawn, chest, before); }
             finally { pendingBallForces.Remove(pawn.Index); }
             bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
-            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (launch force {Force})",
+            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
                 victim.PlayerName, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
                 ballForceApplied ? "applied" : "not applied");
 
@@ -673,17 +673,31 @@ namespace ZeusOnlyMode
         }
 
         // Launch force for the damage a ball is applying right now, by pawn index
-        private readonly Dictionary<uint, (Vector3 Launch, Vector3 At)> pendingBallForces = new();
+        // What the damage a ball is applying right now should carry, by pawn index
+        private sealed record PendingBallHit(Vector3 Launch, Vector3 At, CCSPlayerPawn? Attacker, CBasePlayerWeapon? Zeus);
+
+        private readonly Dictionary<uint, PendingBallHit> pendingBallForces = new();
         private bool ballForceApplied;
 
-        // The game sets the ragdoll's throw from the force on the damage that
-        // kills: putting the ball's launch here (as an impulse, ~100x the
-        // velocity) is what actually sends the body flying
+        // Stamps the ball's own damage as it's processed:
+        //  - attacker = the shooter and weapon = their Zeus, so the game credits
+        //    the shooter with the kill (score and kill feed) exactly like a zap;
+        //  - the launch force, which the game builds the ragdoll's throw from
+        //    (as an impulse, ~100x the velocity) and is what sends bodies flying
         private HookResult OnBallDamagePre(CBaseEntity entity, CTakeDamageInfo info)
         {
             if (pendingBallForces.Count == 0 || entity == null || !entity.IsValid
                 || !pendingBallForces.TryGetValue(entity.Index, out var pending))
                 return HookResult.Continue;
+
+            var attacker = pending.Attacker;
+            if (attacker != null && attacker.IsValid)
+            {
+                info.Attacker.Raw = attacker.EntityHandle.Raw;
+                info.Inflictor.Raw = attacker.EntityHandle.Raw;
+                if (pending.Zeus != null && pending.Zeus.IsValid)
+                    info.Ability.Raw = pending.Zeus.EntityHandle.Raw;
+            }
 
             var direction = Vector3.Normalize(pending.Launch);
             info.DamageForce.X = pending.Launch.X * 100f;
@@ -697,6 +711,22 @@ namespace ZeusOnlyMode
             info.DamageDirection.Z = direction.Z;
             ballForceApplied = true;
             return HookResult.Continue;
+        }
+
+        // The shooter's Zeus, for the kill feed icon (null if they no longer have one)
+        private static CBasePlayerWeapon? FindZeus(CCSPlayerPawn? pawn)
+        {
+            var weapons = pawn?.WeaponServices?.MyWeapons;
+            if (weapons == null)
+                return null;
+
+            foreach (var handle in weapons)
+            {
+                var weapon = handle.Value;
+                if (weapon != null && weapon.IsValid && weapon.DesignerName == "weapon_taser")
+                    return weapon;
+            }
+            return null;
         }
 
         // 34 shock damage credited to the shooter, applied by a point_hurt aimed
