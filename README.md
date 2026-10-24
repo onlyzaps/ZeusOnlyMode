@@ -29,8 +29,8 @@ option to choose it, 8 / 9 to page up / down, or 0 to close. Choices are remembe
 addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/zeus_colors.json. Super Zeus does not need
 to be on to color your zap.
 
-A colored zap replaces the stock zap for everyone else (the shooter's own game always draws the
-stock zap locally on top). A colored lightning ball is drawn with colored rays, a tail and sparks.
+A colored zap is drawn over the stock zap. A colored lightning ball is drawn with colored rays, a
+tail and sparks.
 
 Note: the lightning ball effects are precached on map load, so change the map once after installing
 or hot-loading the plugin.
