@@ -11,14 +11,22 @@ plugin.
 
 Super Zeus
 ----------
-Admins can type superzeus (with or without ! or /) in chat, or css_superzeus in console, to toggle
-Super Zeus. The chat message is never shown to players. Add 1 or 0 to force it on or off.
+Admins (@css/generic) can type superzeus in console, or superzeus / !superzeus / /superzeus in chat,
+to toggle Super Zeus. The chat message is never shown to players. Add 1 or 0 to force it on or off.
 
-While Super Zeus is on, the Zeus reaches 3x as far, and any player can right-click with the Zeus to
-hurl an insta-kill lightning ball. It costs the same charge as a normal zap, so it shares the Zeus's
-recharge. Enemies it hits are killed and their ragdolls launched (LightningBallLaunchSpeed in the
-config); teammates are never hurt, and the ball dissipates on them like it hit a wall. It explodes
-on walls and fizzles out after 2.5 seconds.
+While Super Zeus is on, any player can right-click with the Zeus to hurl an insta-kill lightning
+ball. It costs the same charge as a normal zap, so it shares the Zeus's recharge. Enemies it hits
+are killed and their ragdolls launched across the map; teammates are never hurt, and the ball
+dissipates on them like it hit a wall. It explodes on walls and fizzles out after 2.5 seconds.
+Super Zeus works with or without Zeus Only Mode.
+
+Zeus Colors
+-----------
+Any player can type zeuscolor (with or without ! or /) in chat, or zeuscolor in console, to open a
+menu and pick the color of their Zeus zap, their lightning ball, or both. Chat the number of an
+option to choose it, 0 for the next page, or cancel to close. Choices are remembered per player in
+addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/zeus_colors.json. Super Zeus does not need
+to be on to color your zap.
 
 Note: the lightning ball effects are precached on map load, so change the map once after installing
 or hot-loading the plugin.

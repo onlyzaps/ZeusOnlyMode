@@ -1,5 +1,7 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using System.Drawing;
@@ -9,10 +11,16 @@ namespace ZeusOnlyMode
 {
     public partial class ZeusOnlyPlugin
     {
+        private const string SuperZeusPermission = "@css/generic";
+
         private const float BallSpeed = 1500f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallHitRadius = 28f;
+
+        // How hard a lightning ball kill flings the enemy's ragdoll
+        // (horizontal speed along the ball's path, plus 30% of it upward)
+        private const float RagdollLaunchSpeed = 2400f;
 
         // All effects below exist in CS2's pak01 and only rely on control point 0,
         // so they render correctly from a plain info_particle_system.
@@ -44,6 +52,8 @@ namespace ZeusOnlyMode
         private static readonly Color ArcCoreColor = Color.FromArgb(255, 210, 240, 255);
         private static readonly Color ArcGlowColor = Color.FromArgb(255, 70, 150, 255);
 
+        private bool superZeusEnabled = false;
+        private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
 
@@ -55,25 +65,33 @@ namespace ZeusOnlyMode
             public readonly List<CHandle<CBeam>> Arcs = new();
             public required int OwnerSlot;
             public required byte OwnerTeam;
+            public required ZeusColorOption? Color; // null = stock electric blue
             public required Vector3 Velocity;
             public required Vector3 LastPosition;
             public required float ExpireTime;
             public int Age;
         }
 
-        // ------------------------------------------------------------------
-        // Super Zeus alt-fire: right-click with the zeus while Super Zeus is
-        // on to hurl an insta-kill lightning ball. Toggled by the existing
-        // superzeus command (DoSuperToggle); this file only adds the ball.
-        // ------------------------------------------------------------------
-        private void LoadLightningBalls()
+        private void LoadSuperZeus()
         {
+            AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", (player, info) =>
+                ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null));
+
+            // Handle the chat form ourselves so the message is swallowed and never shown to players
+            AddCommandListener("say", OnSuperZeusChat);
+            AddCommandListener("say_team", OnSuperZeusChat);
+
             RegisterListener<Listeners.OnPlayerButtonsChanged>(OnSuperZeusButtons);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
             {
                 foreach (var resource in SuperZeusResources)
                     manifest.AddResource(resource);
+            });
+            RegisterListener<Listeners.OnMapStart>(_ =>
+            {
+                lightningBalls.Clear();
+                nextBallTime.Clear();
             });
             RegisterEventHandler<EventRoundStart>((ev, info) =>
             {
@@ -82,11 +100,60 @@ namespace ZeusOnlyMode
             });
         }
 
-        // Map teardown: entities are unsafe to touch, so just forget them
-        private void ResetLightningBalls()
+        private void UnloadSuperZeus()
         {
-            lightningBalls.Clear();
-            nextBallTime.Clear();
+            ClearLightningBalls();
+        }
+
+        private HookResult OnSuperZeusChat(CCSPlayerController? player, CommandInfo info)
+        {
+            var parts = info.GetArg(1).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+                return HookResult.Continue;
+
+            string word = parts[0].TrimStart('!', '/');
+            if (!word.Equals("superzeus", StringComparison.OrdinalIgnoreCase))
+                return HookResult.Continue;
+
+            ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null);
+            return HookResult.Handled;
+        }
+
+        private void ToggleSuperZeus(CCSPlayerController? player, string? arg)
+        {
+            if (player != null && !AdminManager.PlayerHasPermissions(player, SuperZeusPermission))
+            {
+                player.PrintToChat("You do not have access to this command.");
+                return;
+            }
+
+            bool newState = arg switch
+            {
+                "1" => true,
+                "0" => false,
+                _ => !superZeusEnabled
+            };
+
+            if (newState == superZeusEnabled)
+            {
+                ReplyToAdmin(player, $"Super Zeus Is Already {(superZeusEnabled ? "Enabled" : "Disabled")}.");
+                return;
+            }
+
+            superZeusEnabled = newState;
+
+            if (superZeusEnabled)
+                Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED{ChatColors.Default} - Right-Click With Your Zeus To Hurl A Lightning Ball!");
+            else
+                Server.PrintToChatAll($" {ChatColors.LightBlue}Super Zeus Disabled.");
+        }
+
+        private static void ReplyToAdmin(CCSPlayerController? player, string message)
+        {
+            if (player == null)
+                Server.PrintToConsole(message);
+            else
+                player.PrintToChat(message);
         }
 
         private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
@@ -163,6 +230,7 @@ namespace ZeusOnlyMode
                 Projectile = HandleOf(projectile),
                 OwnerSlot = player.Slot,
                 OwnerTeam = pawn.TeamNum,
+                Color = GetZeusColor(player, alt: true),
                 Velocity = velocity,
                 LastPosition = spawnPos,
                 ExpireTime = Server.CurrentTime + BallLifetime
@@ -171,12 +239,14 @@ namespace ZeusOnlyMode
             var core = SpawnParticle(FxBallCore, spawnPos, angles, 0f);
             if (core != null) ball.Core = HandleOf(core);
 
-            var light = SpawnBallLight(spawnPos);
+            var light = SpawnBallLight(spawnPos, BoltGlowColor(ball.Color, 0f));
             if (light != null) ball.Light = HandleOf(light);
 
             for (int i = 0; i < 4; i++)
             {
-                var arc = CreateBeam(spawnPos, spawnPos, i % 2 == 0 ? ArcCoreColor : ArcGlowColor, i % 2 == 0 ? 1.2f : 2.4f);
+                bool isCore = i % 2 == 0;
+                var color = isCore ? BoltCoreColor(ball.Color, i * 0.25f) : BoltGlowColor(ball.Color, i * 0.25f);
+                var arc = CreateBeam(spawnPos, spawnPos, color, isCore ? 1.2f : 2.4f);
                 if (arc != null) ball.Arcs.Add(HandleOf(arc));
             }
 
@@ -233,7 +303,7 @@ namespace ZeusOnlyMode
             if (hit != null)
             {
                 if (hit.TeamNum != ball.OwnerTeam)
-                    StrikeVictim(hit, ball.Velocity);
+                    StrikeVictim(hit, ball);
                 else
                     WallBurst(pos); // teammates are never hurt; the ball just dissipates
                 return false;
@@ -257,16 +327,32 @@ namespace ZeusOnlyMode
 
             var angles = DirectionToAngles(ball.Velocity);
             ball.Core?.Value?.Teleport(pos, angles, Vector3.Zero);
-            ball.Light?.Value?.Teleport(pos, Vector3.Zero, Vector3.Zero);
+
+            var light = ball.Light?.Value;
+            if (light != null && light.IsValid)
+            {
+                light.Teleport(pos, Vector3.Zero, Vector3.Zero);
+                if (ball.Color?.Rainbow == true)
+                {
+                    light.Color = BoltGlowColor(ball.Color, 0f);
+                    Utilities.SetStateChanged(light, "CBarnLight", "m_Color");
+                }
+            }
 
             // Re-roll the crackling arcs every tick so the ball constantly writhes
-            foreach (var arcHandle in ball.Arcs)
+            for (int i = 0; i < ball.Arcs.Count; i++)
             {
-                var arc = arcHandle.Value;
+                var arc = ball.Arcs[i].Value;
                 if (arc == null || !arc.IsValid) continue;
 
                 arc.Teleport(pos + RandomUnit() * 3f, Vector3.Zero, Vector3.Zero);
                 SetBeamEnd(arc, pos + RandomUnit() * (14f + rng.NextSingle() * 14f), true);
+
+                if (ball.Color?.Rainbow == true)
+                {
+                    arc.Render = i % 2 == 0 ? BoltCoreColor(ball.Color, i * 0.25f) : BoltGlowColor(ball.Color, i * 0.25f);
+                    Utilities.SetStateChanged(arc, "CBaseModelEntity", "m_clrRender");
+                }
             }
 
             // Spark and glow puffs left behind in the world form the trail
@@ -306,7 +392,7 @@ namespace ZeusOnlyMode
             return null;
         }
 
-        private void StrikeVictim(CCSPlayerController victim, Vector3 travel)
+        private void StrikeVictim(CCSPlayerController victim, LightningBall ball)
         {
             var pawn = victim.PlayerPawn.Value;
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
@@ -314,10 +400,11 @@ namespace ZeusOnlyMode
 
             var chest = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, 40f);
             var sky = chest + new Vector3((rng.NextSingle() - 0.5f) * 120f, (rng.NextSingle() - 0.5f) * 120f, 620f);
+            var color = ball.Color;
 
             // Two quick strokes with different shapes read as a flickering strike
-            DrawLightningBolt(sky, chest, 0.12f);
-            AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f), TimerFlags.STOP_ON_MAPCHANGE);
+            DrawLightningBolt(sky, chest, 0.12f, color, 1f, true);
+            AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f, color, 1f, true), TimerFlags.STOP_ON_MAPCHANGE);
 
             ImpactBurst(chest);
             SpawnParticle(FxImpactFlare, sky, Vector3.Zero, 1f);
@@ -325,14 +412,13 @@ namespace ZeusOnlyMode
             pawn.EmitSound("Player.DeathTaser");
             pawn.EmitSound("Flashbang.Explode");
 
-            // Fling the body along the ball's path. Same trick as the superzeus
-            // knockback: velocity set BEFORE death is inherited by the ragdoll,
-            // and the ragdoll impulse stamped right after (same tick, so the
-            // client gets both with the death) throws the client-side ragdoll.
-            var flat = new Vector3(travel.X, travel.Y, 0f);
+            // Fling the body along the ball's path: velocity set BEFORE death is
+            // inherited by the ragdoll, and the ragdoll impulse stamped right
+            // after (same tick, so the client gets both with the death) throws
+            // the client-side ragdoll.
+            var flat = new Vector3(ball.Velocity.X, ball.Velocity.Y, 0f);
             var dir = flat.LengthSquared() < 1f ? Vector3.UnitX : Vector3.Normalize(flat);
-            float speed = Config.LightningBallLaunchSpeed;
-            var launch = dir * speed + new Vector3(0f, 0f, speed * 0.3f);
+            var launch = dir * RagdollLaunchSpeed + new Vector3(0f, 0f, RagdollLaunchSpeed * 0.3f);
 
             pawn.Teleport(null, null, (Vector3?)launch);
             pawn.CommitSuicide(false, true);
@@ -365,24 +451,38 @@ namespace ZeusOnlyMode
             return flash;
         }
 
-        private void DrawLightningBolt(Vector3 start, Vector3 end, float lifetime)
+        // Player color (or the stock blue); offset spreads Rainbow along a bolt
+        private static Color BoltGlowColor(ZeusColorOption? color, float offset) =>
+            color == null ? ArcGlowColor : ResolveColor(color, offset);
+
+        private static Color BoltCoreColor(ZeusColorOption? color, float offset) =>
+            color == null ? ArcCoreColor : Whiten(ResolveColor(color, offset), 0.6f);
+
+        // Jagged multi-segment bolt: a wide glow beam with a hot core beam on
+        // top, plus optional side branches. scale shrinks it for zaps.
+        private void DrawLightningBolt(Vector3 start, Vector3 end, float lifetime, ZeusColorOption? color, float scale, bool branches)
         {
             var beams = new List<CHandle<CBeam>>();
 
-            var trunk = JaggedPath(start, end, 12, 26f);
+            int segments = Math.Max(4, (int)(Vector3.Distance(start, end) / 55f));
+            var trunk = JaggedPath(start, end, Math.Min(segments, 12), 26f * scale);
             for (int i = 0; i < trunk.Count - 1; i++)
             {
-                AddBeam(beams, trunk[i], trunk[i + 1], ArcGlowColor, 9f);
-                AddBeam(beams, trunk[i], trunk[i + 1], ArcCoreColor, 3f);
+                float t = i / (float)trunk.Count;
+                AddBeam(beams, trunk[i], trunk[i + 1], BoltGlowColor(color, t), 9f * scale);
+                AddBeam(beams, trunk[i], trunk[i + 1], BoltCoreColor(color, t), 3f * scale);
             }
 
-            for (int b = 0; b < 3; b++)
+            if (branches && trunk.Count > 5)
             {
-                var origin = trunk[2 + rng.Next(trunk.Count - 5)];
-                var dir = Vector3.Normalize(RandomUnit() + new Vector3(0, 0, -1.2f));
-                var branch = JaggedPath(origin, origin + dir * (70f + rng.NextSingle() * 90f), 4, 14f);
-                for (int i = 0; i < branch.Count - 1; i++)
-                    AddBeam(beams, branch[i], branch[i + 1], ArcGlowColor, 3f);
+                for (int b = 0; b < 3; b++)
+                {
+                    var origin = trunk[2 + rng.Next(trunk.Count - 5)];
+                    var dir = Vector3.Normalize(RandomUnit() + new Vector3(0, 0, -1.2f));
+                    var branch = JaggedPath(origin, origin + dir * (70f + rng.NextSingle() * 90f), 4, 14f);
+                    for (int i = 0; i < branch.Count - 1; i++)
+                        AddBeam(beams, branch[i], branch[i + 1], BoltGlowColor(color, b / 3f), 3f);
+                }
             }
 
             AddTimer(lifetime, () =>
@@ -435,7 +535,7 @@ namespace ZeusOnlyMode
                 Utilities.SetStateChanged(beam, "CBeam", "m_vecEndPos");
         }
 
-        private static COmniLight? SpawnBallLight(Vector3 pos)
+        private static COmniLight? SpawnBallLight(Vector3 pos, Color color)
         {
             var light = Utilities.CreateEntityByName<COmniLight>("light_omni2");
             if (light == null)
@@ -444,7 +544,7 @@ namespace ZeusOnlyMode
             light.Enabled = true;
             light.DirectLight = 3; // dynamic
             light.CastShadows = 0;
-            light.Color = ArcGlowColor;
+            light.Color = color;
             light.Brightness = 3f;
             light.Range = 320f;
             light.InnerAngle = 180f;
