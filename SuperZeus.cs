@@ -2,9 +2,11 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
+using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using System.Drawing;
+using System.Globalization;
 using Vector3 = System.Numerics.Vector3;
 
 namespace ZeusOnlyMode
@@ -56,6 +58,17 @@ namespace ZeusOnlyMode
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
+        private readonly List<PendingRecharge> pendingRecharges = new();
+        private ConVar? taserRechargeCvar;
+
+        // CS2's stock mp_taser_recharge_time, used if the cvar can't be read
+        private const float DefaultTaserRechargeSeconds = 30f;
+
+        private sealed class PendingRecharge
+        {
+            public required CHandle<CWeaponTaser> Zeus;
+            public required float ReadyAt;
+        }
 
         private sealed class LightningBall
         {
@@ -92,6 +105,8 @@ namespace ZeusOnlyMode
             {
                 lightningBalls.Clear();
                 nextBallTime.Clear();
+                pendingRecharges.Clear();
+                taserRechargeCvar = null;
             });
             RegisterEventHandler<EventRoundStart>((ev, info) =>
             {
@@ -189,15 +204,61 @@ namespace ZeusOnlyMode
             FireLightningBall(player, pawn, zeus);
         }
 
-        // Spend the charge exactly like a primary fire does, which also
-        // starts the zeus's normal recharge
-        private static void ConsumeZeusCharge(CWeaponTaser zeus)
+        // Spend the charge like a primary fire does. Setting the fire time
+        // drives the HUD's recharge meter, but the server-side refill a real
+        // shot schedules isn't reachable from here, so the meter would stall
+        // at 99% forever. We finish the recharge ourselves at the same moment
+        // the meter fills (mp_taser_recharge_time after the shot).
+        private void ConsumeZeusCharge(CWeaponTaser zeus)
         {
             zeus.Clip1 -= 1;
             zeus.FireTime = Server.CurrentTime;
             zeus.LastAttackTick = Server.TickCount;
             Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
             Utilities.SetStateChanged(zeus, "CWeaponTaser", "m_fFireTime");
+
+            pendingRecharges.Add(new PendingRecharge
+            {
+                Zeus = HandleOf(zeus),
+                ReadyAt = Server.CurrentTime + TaserRechargeSeconds()
+            });
+        }
+
+        private float TaserRechargeSeconds()
+        {
+            taserRechargeCvar ??= ConVar.Find("mp_taser_recharge_time");
+            return float.TryParse(taserRechargeCvar?.StringValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+                ? Math.Max(seconds, 0f)
+                : DefaultTaserRechargeSeconds;
+        }
+
+        private void ProcessPendingRecharges()
+        {
+            float now = Server.CurrentTime;
+            for (int i = pendingRecharges.Count - 1; i >= 0; i--)
+            {
+                var pending = pendingRecharges[i];
+                var zeus = pending.Zeus.Value;
+
+                // Gone, or already refilled (by the game or a fresh zeus)
+                if (zeus == null || !zeus.IsValid || zeus.Clip1 > 0)
+                {
+                    pendingRecharges.RemoveAt(i);
+                    continue;
+                }
+
+                if (now < pending.ReadyAt)
+                    continue;
+
+                zeus.Clip1 = Math.Max(1, zeus.VData?.MaxClip1 ?? 1);
+                Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
+
+                var owner = zeus.OwnerEntity.Value;
+                if (owner != null && owner.IsValid)
+                    owner.EmitSound("Weapon_Taser.ChargeReady");
+
+                pendingRecharges.RemoveAt(i);
+            }
         }
 
         private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
@@ -280,6 +341,9 @@ namespace ZeusOnlyMode
 
         private void OnSuperZeusTick()
         {
+            if (pendingRecharges.Count > 0)
+                ProcessPendingRecharges();
+
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
                 if (!UpdateLightningBall(lightningBalls[i]))
