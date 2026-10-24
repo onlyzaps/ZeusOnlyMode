@@ -293,7 +293,7 @@ namespace ZeusOnlyMode
                 Projectile = HandleOf(projectile),
                 OwnerSlot = player.Slot,
                 OwnerTeam = pawn.TeamNum,
-                Color = GetZeusColor(player, alt: true),
+                Color = GetZeusColor(player),
                 Velocity = velocity,
                 LastPosition = spawnPos,
                 ExpireTime = Server.CurrentTime + BallLifetime

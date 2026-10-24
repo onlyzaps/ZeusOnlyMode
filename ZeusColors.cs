@@ -48,11 +48,8 @@ namespace ZeusOnlyMode
             public string? Alt { get; set; }
         }
 
-        private enum ColorMenuTarget { Primary, Alt, Both }
-
         private sealed class ColorMenuState
         {
-            public ColorMenuTarget? Target; // null = still choosing what to color
             public int Page;
             public float ExpireAt;
             public string Html = "";
@@ -85,7 +82,7 @@ namespace ZeusOnlyMode
 
             // Bare name (no css_ prefix) so CSS's own !/ chat dispatch never
             // fires it a second time on top of our chat handler
-            AddCommand("zeuscolor", "Choose the color of your Zeus zap and lightning ball", (player, info) =>
+            AddCommand("zeuscolor", "Choose the color of your Zeus zap and lightning ball (or press Reload with the Zeus)", (player, info) =>
             {
                 if (player == null || !player.IsValid || player.IsBot)
                 {
@@ -108,6 +105,7 @@ namespace ZeusOnlyMode
                 Logger.LogWarning("CMsgTEFireBullets not found; the stock zap can't be hidden for colored zaps.");
 
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
+            RegisterListener<Listeners.OnPlayerButtonsChanged>(OnZeusColorButtons);
             RegisterListener<Listeners.OnTick>(() =>
             {
                 if (colorZaps.Count > 0)
@@ -157,7 +155,7 @@ namespace ZeusOnlyMode
             if (player == null || !player.IsValid || !ev.Weapon.Contains("taser"))
                 return HookResult.Continue;
 
-            if (GetZeusColor(player, alt: false) == null)
+            if (GetZeusColor(player) == null)
                 return HookResult.Continue;
 
             int slot = player.Slot;
@@ -195,7 +193,7 @@ namespace ZeusOnlyMode
                 return HookResult.Continue;
 
             var shooter = message.HasField("player") ? FindPlayerByHandle(message.ReadUInt("player")) : null;
-            if (shooter == null || GetZeusColor(shooter, alt: false) == null)
+            if (shooter == null || GetZeusColor(shooter) == null)
                 return HookResult.Continue;
 
             var pawn = shooter.PlayerPawn.Value;
@@ -243,7 +241,7 @@ namespace ZeusOnlyMode
 
         private void DrawZap(CCSPlayerController player, Vector3 end)
         {
-            var color = GetZeusColor(player, alt: false);
+            var color = GetZeusColor(player);
             var pawn = player.PlayerPawn.Value;
             if (color == null || pawn == null || pawn.AbsOrigin == null)
                 return;
@@ -431,8 +429,9 @@ namespace ZeusOnlyMode
 
         // --- Lookups used by the zap and the lightning ball ----------------
 
-        // null = the player never picked one (or picked Default)
-        private ZeusColorOption? GetZeusColor(CCSPlayerController? player, bool alt)
+        // One color drives both the zap and the lightning ball.
+        // null = the player never picked one (or picked Default).
+        private ZeusColorOption? GetZeusColor(CCSPlayerController? player)
         {
             if (player == null || !player.IsValid || player.IsBot)
                 return null;
@@ -440,7 +439,8 @@ namespace ZeusOnlyMode
             if (!zeusColorPrefs.TryGetValue(player.SteamID, out var prefs))
                 return null;
 
-            var option = FindColorOption(alt ? prefs.Alt : prefs.Primary);
+            // Older saves may hold separate zap/ball picks; the zap pick wins
+            var option = FindColorOption(prefs.Primary ?? prefs.Alt);
             return option == null || option.Key == "default" ? null : option;
         }
 
@@ -463,11 +463,29 @@ namespace ZeusOnlyMode
 
         // --- Menu ----------------------------------------------------------
 
+        // Reload with the Zeus in hand opens / closes the menu (the Zeus
+        // can't reload, so this never steals a real reload)
+        private void OnZeusColorButtons(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
+        {
+            if ((pressed & PlayerButtons.Reload) == 0 || player == null || !player.IsValid || player.IsBot)
+                return;
+
+            var weapon = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
+            if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
+                return;
+
+            if (colorMenus.ContainsKey(player.Slot))
+                CloseColorMenu(player);
+            else
+                OpenColorMenu(player);
+        }
+
         private void OpenColorMenu(CCSPlayerController player)
         {
-            colorMenus[player.Slot] = new ColorMenuState { ExpireAt = Server.CurrentTime + ColorMenuIdleSeconds };
+            var menu = new ColorMenuState { ExpireAt = Server.CurrentTime + ColorMenuIdleSeconds };
+            colorMenus[player.Slot] = menu;
             RefreshColorMenu(player);
-            player.PrintToChat($" {ChatColors.Gold}Zeus Color{ChatColors.Default}: chat {ChatColors.Green}1{ChatColors.Default} Zap, {ChatColors.Green}2{ChatColors.Default} Lightning Ball, {ChatColors.Green}3{ChatColors.Default} Both, or {ChatColors.Green}0{ChatColors.Default} to close.");
+            PrintColorPageToChat(player, menu);
         }
 
         private void CloseColorMenu(CCSPlayerController player)
@@ -476,8 +494,8 @@ namespace ZeusOnlyMode
                 player.PrintToCenterHtml(" ");
         }
 
-        // Called from OnSay before anything else. Numbers and "cancel" belong
-        // to the open menu (and are hidden); anything else is ordinary chat.
+        // Called from the chat hook before anything else. Numbers and "cancel"
+        // belong to the open menu (and are hidden); anything else is ordinary chat.
         private bool TryHandleColorMenuInput(CCSPlayerController player, string input)
         {
             if (!colorMenus.TryGetValue(player.Slot, out var menu))
@@ -486,7 +504,6 @@ namespace ZeusOnlyMode
             if (input.Equals("cancel", StringComparison.OrdinalIgnoreCase))
             {
                 CloseColorMenu(player);
-                player.PrintToChat($" {ChatColors.Default}Zeus color menu closed.");
                 return true;
             }
 
@@ -494,22 +511,6 @@ namespace ZeusOnlyMode
                 return false;
 
             menu.ExpireAt = Server.CurrentTime + ColorMenuIdleSeconds;
-
-            if (menu.Target == null)
-            {
-                switch (choice)
-                {
-                    case 0: CloseColorMenu(player); return true;
-                    case 1: menu.Target = ColorMenuTarget.Primary; break;
-                    case 2: menu.Target = ColorMenuTarget.Alt; break;
-                    case 3: menu.Target = ColorMenuTarget.Both; break;
-                    default: return true;
-                }
-                menu.Page = 0;
-                RefreshColorMenu(player);
-                PrintColorPageToChat(player, menu);
-                return true;
-            }
 
             switch (choice)
             {
@@ -532,27 +533,21 @@ namespace ZeusOnlyMode
             if (choice < 1 || choice > ColorsPerPage || index >= ZeusColorOptions.Length)
                 return true;
 
-            ApplyColorChoice(player, menu.Target.Value, ZeusColorOptions[index]);
+            ApplyColorChoice(player, ZeusColorOptions[index]);
             CloseColorMenu(player);
             return true;
         }
 
-        private void ApplyColorChoice(CCSPlayerController player, ColorMenuTarget target, ZeusColorOption option)
+        private void ApplyColorChoice(CCSPlayerController player, ZeusColorOption option)
         {
             if (!zeusColorPrefs.TryGetValue(player.SteamID, out var prefs))
                 zeusColorPrefs[player.SteamID] = prefs = new ZeusColorPrefs();
 
-            if (target != ColorMenuTarget.Alt) prefs.Primary = option.Key;
-            if (target != ColorMenuTarget.Primary) prefs.Alt = option.Key;
+            prefs.Primary = option.Key;
+            prefs.Alt = option.Key;
             SaveZeusColors();
 
-            string what = target switch
-            {
-                ColorMenuTarget.Primary => "Zeus zap",
-                ColorMenuTarget.Alt => "lightning ball",
-                _ => "Zeus zap and lightning ball"
-            };
-            player.PrintToChat($" {ChatColors.Default}Your {what} color is now {option.Chat}{option.Name}{ChatColors.Default}.");
+            player.PrintToChat($" {ChatColors.Default}Your Zeus color is now {option.Chat}{option.Name}{ChatColors.Default}.");
         }
 
         private static int ColorPageCount => (ZeusColorOptions.Length + ColorsPerPage - 1) / ColorsPerPage;
@@ -560,7 +555,7 @@ namespace ZeusOnlyMode
         // The chat side of the menu, like SimpleVote's nomination list
         private static void PrintColorPageToChat(CCSPlayerController player, ColorMenuState menu)
         {
-            player.PrintToChat($" {ChatColors.Default}Page {menu.Page + 1}/{ColorPageCount}. Type a number to choose:");
+            player.PrintToChat($" {ChatColors.Gold}Zeus Color{ChatColors.Default} - page {menu.Page + 1}/{ColorPageCount}. Type a number to choose:");
 
             int start = menu.Page * ColorsPerPage;
             for (int i = start; i < Math.Min(start + ColorsPerPage, ZeusColorOptions.Length); i++)
@@ -580,44 +575,23 @@ namespace ZeusOnlyMode
 
         private string BuildColorMenuHtml(CCSPlayerController player, ColorMenuState menu)
         {
+            var current = GetZeusColor(player)?.Key ?? "default";
             var sb = new StringBuilder();
+            sb.Append($"<font color='#FFD700'><b>Zeus Color - page {menu.Page + 1}/{ColorPageCount}</b></font>");
 
-            if (menu.Target == null)
-            {
-                zeusColorPrefs.TryGetValue(player.SteamID, out var prefs);
-                var primary = FindColorOption(prefs?.Primary) ?? ZeusColorOptions[0];
-                var alt = FindColorOption(prefs?.Alt) ?? ZeusColorOptions[0];
-
-                sb.Append("<font color='#FFD700'><b>Zeus Color - chat a number</b></font>");
-                sb.Append($"<br><font color='#FF5722'>1:</font> <font color='#EAD1AF'>Zeus Zap</font> <font color='#9E9E9E'>(</font>{ColoredName(primary)}<font color='#9E9E9E'>)</font>");
-                sb.Append($"<br><font color='#FF5722'>2:</font> <font color='#EAD1AF'>Lightning Ball</font> <font color='#9E9E9E'>(</font>{ColoredName(alt)}<font color='#9E9E9E'>)</font>");
-                sb.Append("<br><font color='#FF5722'>3:</font> <font color='#EAD1AF'>Both</font>");
-                sb.Append("<br><font color='#FF5722'>0:</font> <font color='#9E9E9E'>Close</font>");
-                return sb.ToString();
-            }
-
-            string title = menu.Target switch
-            {
-                ColorMenuTarget.Primary => "Zap Color",
-                ColorMenuTarget.Alt => "Lightning Ball Color",
-                _ => "Zap + Ball Color"
-            };
-            sb.Append($"<font color='#FFD700'><b>{title} - page {menu.Page + 1}/{ColorPageCount}</b></font>");
-
-            // Each whole row, number included, is drawn in its own color
+            // Each whole row, number included, is drawn in its own color;
+            // the player's current color is marked
             int start = menu.Page * ColorsPerPage;
             for (int i = start; i < Math.Min(start + ColorsPerPage, ZeusColorOptions.Length); i++)
             {
                 var option = ZeusColorOptions[i];
-                sb.Append($"<br><font color='{Hex(option.Color)}'>{i - start + 1}: {option.Name}</font>");
+                string mark = option.Key == current ? " &lt;" : "";
+                sb.Append($"<br><font color='{Hex(option.Color)}'>{i - start + 1}: {option.Name}{mark}</font>");
             }
 
             sb.Append("<br><font color='#9E9E9E'>8: Page Up   9: Page Down   0: Close</font>");
             return sb.ToString();
         }
-
-        private static string ColoredName(ZeusColorOption option) =>
-            $"<font color='{Hex(option.Color)}'>{option.Name}</font>";
 
         // The center panel only stays up while it keeps being fed, so re-send
         // every tick (the same approach SimpleVote's vote panel uses)
