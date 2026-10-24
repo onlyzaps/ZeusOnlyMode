@@ -104,10 +104,10 @@ namespace ZeusOnlyMode
         };
     }
 
-    public class ZeusOnlyPlugin : BasePlugin, IPluginConfig<ZeusOnlyConfig>
+    public partial class ZeusOnlyPlugin : BasePlugin, IPluginConfig<ZeusOnlyConfig>
     {
         public override string ModuleName => "Zeus Only Mode";
-        public override string ModuleVersion => "3.4";
+        public override string ModuleVersion => "3.5";
 
         public ZeusOnlyConfig Config { get; set; } = new();
 
@@ -233,6 +233,9 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventGameEnd>(OnMapEnd);
             // Hook buy command
             AddCommandListener("buy", OnBuyCommand);
+
+            // Super Zeus alt-fire lightning balls (SuperZeus.cs)
+            LoadLightningBalls();
         }
 
         // Natural game end (scoreboard) — entities are still alive here, so we
@@ -284,6 +287,7 @@ namespace ZeusOnlyMode
             zeusOnlyEnabled = false;
             savedWeapons.Clear();
             Array.Clear(pendingZap, 0, pendingZap.Length);
+            ResetLightningBalls();
 
             // FIX (dead commands after map change): reset the debounce
             // timestamps too, so a stale value can never lock the toggles out.
@@ -342,7 +346,7 @@ namespace ZeusOnlyMode
             DoZeusToggle(caller, ParseToggleArg(info));
         }
 
-        [ConsoleCommand("css_superzeus", "Toggle Super Zeus (3x range)")]
+        [ConsoleCommand("css_superzeus", "Toggle Super Zeus (3x range + alt-fire lightning ball)")]
         public void ConCommand_SuperZeus(CCSPlayerController? caller, CommandInfo info)
         {
             if (!IsAdmin(caller))
@@ -433,7 +437,7 @@ namespace ZeusOnlyMode
             ApplyTaserRangeToAll();
 
             Server.PrintToChatAll(superZeusEnabled
-                ? "Super Zeus Enabled — The Zeus Now Reaches 3x As Far!"
+                ? "Super Zeus Enabled — The Zeus Now Reaches 3x As Far! Right-Click To Hurl A Lightning Ball!"
                 : "Super Zeus Disabled — Zeus Range Is Back To Normal.");
         }
 
@@ -1410,6 +1414,8 @@ namespace ZeusOnlyMode
 
         public override void Unload(bool hotReload)
         {
+            // Entities are still alive on unload, so actually remove the balls
+            ClearLightningBalls();
             ResetPluginState();
         }
     }
