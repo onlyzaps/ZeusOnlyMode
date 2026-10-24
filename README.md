@@ -22,10 +22,11 @@ Super Zeus works with or without Zeus Only Mode.
 
 Zeus Colors
 -----------
-Any player can press Reload while holding the Zeus, or type zeuscolor (with or without ! or /) in
-chat, to open or close a menu and pick one color for both their Zeus zap and their lightning ball:
-Red, Orange, Yellow, Green, Blue (Default), Purple, Pink, Gold or Silver. Chat the number of an
-option to choose it, 8 / 9 to page up / down, or 0 to close. Choices are remembered per player in
+Any player can pick one color for both their Zeus zap and their lightning ball: Red, Orange,
+Yellow, Green, Blue (Default), Purple, Pink, Gold or Silver. Hold the Zeus and press Reload to show
+the color menu and step to the next color, or Inspect to step back. Each step takes effect right
+away and the menu hides itself a few seconds after the last press, so it never stops you moving or
+shooting. Typing zeuscolor in chat also shows the menu. Choices are remembered per player in
 addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/zeus_colors.json. Super Zeus does not need
 to be on to color your zap.
 
