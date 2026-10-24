@@ -1,6 +1,5 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using System.Drawing;
@@ -17,13 +16,16 @@ namespace ZeusOnlyMode
 
         // All effects below exist in CS2's pak01 and only rely on control point 0,
         // so they render correctly from a plain info_particle_system.
+        //
+        // Avoid weapon_taser_flash (and weapon_muzzle_flash_taser, which
+        // contains it): it's a viewmodel sprite drawn MOD2X with 10x overbright
+        // and no z-buffering, so out in the world it renders as a white box.
         private const string FxBallCore = "particles/ambient_fx/ambient_sparks_glow.vpcf";          // looping arcs + flares + particle light
         private const string FxBallGlow = "particles/generic_fx/fx_electricspark_glow.vpcf";        // electric arc sprites + light
         private const string FxBallSparks = "particles/weapons/cs_weapon_fx/weapon_taser_sparks.vpcf";
-        private const string FxMuzzleFlash = "particles/weapons/cs_weapon_fx/weapon_muzzle_flash_taser.vpcf";
+        private const string FxMuzzleGlow = "particles/weapons/cs_weapon_fx/weapon_taser_glow.vpcf";
         private const string FxMuzzleSmokePuff = "particles/unified_weapon_fx/uweapon_muzflsh_gen_large_smoke.vpcf";
         private const string FxMuzzleSmokeTrail = "particles/weapons/cs_weapon_fx/weapon_muzzle_smoke_long.vpcf";
-        private const string FxImpactFlash = "particles/weapons/cs_weapon_fx/weapon_taser_flash.vpcf";
         private const string FxImpactFlare = "particles/generic_fx/fx_electricspark_flare.vpcf";
         private const string FxImpactSparks = "particles/explosions_fx/bumpmine_detonate_sparks.vpcf";
         private const string FxImpactRing = "particles/explosions_fx/bumpmine_detonate_ring.vpcf";
@@ -35,14 +37,13 @@ namespace ZeusOnlyMode
         private static readonly string[] SuperZeusResources =
         {
             BallCarrierModel,
-            FxBallCore, FxBallGlow, FxBallSparks, FxMuzzleFlash, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
-            FxImpactFlash, FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris
+            FxBallCore, FxBallGlow, FxBallSparks, FxMuzzleGlow, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
+            FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris
         };
 
         private static readonly Color ArcCoreColor = Color.FromArgb(255, 210, 240, 255);
         private static readonly Color ArcGlowColor = Color.FromArgb(255, 70, 150, 255);
 
-        private ConVar? friendlyFireCvar;
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
 
@@ -86,7 +87,6 @@ namespace ZeusOnlyMode
         {
             lightningBalls.Clear();
             nextBallTime.Clear();
-            friendlyFireCvar = null;
         }
 
         private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
@@ -109,8 +109,28 @@ namespace ZeusOnlyMode
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
                 return;
 
+            // Same energy as a normal zap: no charge, no ball
+            var zeus = weapon.As<CWeaponTaser>();
+            if (zeus.Clip1 <= 0)
+            {
+                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
+                return;
+            }
+
             nextBallTime[player.Slot] = now + BallCooldown;
-            FireLightningBall(player, pawn, weapon.As<CCSWeaponBase>());
+            ConsumeZeusCharge(zeus);
+            FireLightningBall(player, pawn, zeus);
+        }
+
+        // Spend the charge exactly like a primary fire does, which also
+        // starts the zeus's normal recharge
+        private static void ConsumeZeusCharge(CWeaponTaser zeus)
+        {
+            zeus.Clip1 -= 1;
+            zeus.FireTime = Server.CurrentTime;
+            zeus.LastAttackTick = Server.TickCount;
+            Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
+            Utilities.SetStateChanged(zeus, "CWeaponTaser", "m_fFireTime");
         }
 
         private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
@@ -162,9 +182,10 @@ namespace ZeusOnlyMode
 
             lightningBalls.Add(ball);
 
-            // Muzzle: flash, a heavy puff, and a smoke wisp that trails off the shooter
-            SpawnParticle(FxMuzzleFlash, muzzle, angles, 1f);
+            // Muzzle: glow, sparks, a heavy puff, and a smoke wisp that trails off the shooter
+            SpawnParticle(FxMuzzleGlow, muzzle, angles, 1f);
             SpawnParticle(FxImpactFlare, muzzle, angles, 1f);
+            SpawnParticle(FxBallSparks, muzzle, angles, 1f);
             SpawnParticle(FxMuzzleSmokePuff, muzzle, angles, 3f);
             SpawnParticle(FxMuzzleSmokeTrail, muzzle, angles, 5f, pawn);
 
@@ -172,13 +193,6 @@ namespace ZeusOnlyMode
             pawn.EmitSound("Weapon_Taser.ChargeReady_Zap");
 
             KickZeus(zeus);
-
-            // Shove the shooter backwards; a small hop keeps ground friction from eating it
-            var push = -forward * 320f;
-            if ((pawn.Flags & (uint)PlayerFlags.FL_ONGROUND) != 0)
-                push.Z = Math.Max(push.Z, 0f) + 110f;
-            var newVelocity = ToVec3(pawn.AbsVelocity) + push;
-            pawn.Teleport(null, null, (Vector3?)newVelocity);
         }
 
         // Recoil the zeus itself (not the camera): put the weapon into its
@@ -215,18 +229,19 @@ namespace ZeusOnlyMode
 
             var pos = ToVec3(projectile.AbsOrigin);
 
-            var victim = FindVictim(ball, ball.LastPosition, pos);
-            if (victim != null)
+            var hit = FindHitPlayer(ball, ball.LastPosition, pos);
+            if (hit != null)
             {
-                StrikeVictim(victim);
+                if (hit.TeamNum != ball.OwnerTeam)
+                    StrikeVictim(hit, ball.Velocity);
+                else
+                    WallBurst(pos); // teammates are never hurt; the ball just dissipates
                 return false;
             }
 
             if (projectile.Bounces > 0)
             {
-                var burst = ImpactBurst(pos);
-                burst?.EmitSound("Weapon_Taser.Hit");
-                burst?.EmitSound("DoSpark");
+                WallBurst(pos);
                 return false;
             }
 
@@ -265,17 +280,12 @@ namespace ZeusOnlyMode
             return true;
         }
 
-        private CCSPlayerController? FindVictim(LightningBall ball, Vector3 from, Vector3 to)
+        // Any living player (other than the shooter) the ball passed through this tick
+        private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to)
         {
-            friendlyFireCvar ??= ConVar.Find("mp_friendlyfire");
-            bool friendlyFire = friendlyFireCvar?.GetPrimitiveValue<bool>() ?? false;
-
             foreach (var player in Utilities.GetPlayers())
             {
                 if (player == null || !player.IsValid || !player.PawnIsAlive || player.Slot == ball.OwnerSlot)
-                    continue;
-
-                if (!friendlyFire && player.TeamNum == ball.OwnerTeam)
                     continue;
 
                 var pawn = player.PlayerPawn.Value;
@@ -296,7 +306,7 @@ namespace ZeusOnlyMode
             return null;
         }
 
-        private void StrikeVictim(CCSPlayerController victim)
+        private void StrikeVictim(CCSPlayerController victim, Vector3 travel)
         {
             var pawn = victim.PlayerPawn.Value;
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
@@ -310,17 +320,43 @@ namespace ZeusOnlyMode
             AddTimer(0.14f, () => DrawLightningBolt(sky, chest, 0.22f), TimerFlags.STOP_ON_MAPCHANGE);
 
             ImpactBurst(chest);
-            SpawnParticle(FxImpactFlash, sky, Vector3.Zero, 1f);
+            SpawnParticle(FxImpactFlare, sky, Vector3.Zero, 1f);
 
             pawn.EmitSound("Player.DeathTaser");
             pawn.EmitSound("Flashbang.Explode");
+
+            // Fling the body along the ball's path. Same trick as the superzeus
+            // knockback: velocity set BEFORE death is inherited by the ragdoll,
+            // and the ragdoll impulse stamped right after (same tick, so the
+            // client gets both with the death) throws the client-side ragdoll.
+            var flat = new Vector3(travel.X, travel.Y, 0f);
+            var dir = flat.LengthSquared() < 1f ? Vector3.UnitX : Vector3.Normalize(flat);
+            float speed = Config.LightningBallLaunchSpeed;
+            var launch = dir * speed + new Vector3(0f, 0f, speed * 0.3f);
+
+            pawn.Teleport(null, null, (Vector3?)launch);
             pawn.CommitSuicide(false, true);
+
+            pawn.RagdollDamageForce.X = launch.X * 100f;
+            pawn.RagdollDamageForce.Y = launch.Y * 100f;
+            pawn.RagdollDamageForce.Z = launch.Z * 100f;
+            pawn.RagdollDamagePosition.X = chest.X;
+            pawn.RagdollDamagePosition.Y = chest.Y;
+            pawn.RagdollDamagePosition.Z = chest.Z;
+            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
+            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamagePosition");
+        }
+
+        private void WallBurst(Vector3 pos)
+        {
+            var burst = ImpactBurst(pos);
+            burst?.EmitSound("Weapon_Taser.Hit");
+            burst?.EmitSound("DoSpark");
         }
 
         private CParticleSystem? ImpactBurst(Vector3 pos)
         {
-            var flash = SpawnParticle(FxImpactFlash, pos, Vector3.Zero, 2f);
-            SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 2f);
+            var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 2f);
             SpawnParticle(FxImpactSparks, pos, Vector3.Zero, 2f);
             SpawnParticle(FxImpactRing, pos, Vector3.Zero, 2f);
             SpawnParticle(FxImpactArcs, pos, Vector3.Zero, 2f);

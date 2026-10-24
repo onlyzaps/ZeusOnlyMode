@@ -15,8 +15,10 @@ Admins can type superzeus (with or without ! or /) in chat, or css_superzeus in 
 Super Zeus. The chat message is never shown to players. Add 1 or 0 to force it on or off.
 
 While Super Zeus is on, the Zeus reaches 3x as far, and any player can right-click with the Zeus to
-hurl an insta-kill lightning ball (1 second cooldown). The ball explodes on walls and fizzles out
-after 2.5 seconds, and it respects mp_friendlyfire.
+hurl an insta-kill lightning ball. It costs the same charge as a normal zap, so it shares the Zeus's
+recharge. Enemies it hits are killed and their ragdolls launched (LightningBallLaunchSpeed in the
+config); teammates are never hurt, and the ball dissipates on them like it hit a wall. It explodes
+on walls and fizzles out after 2.5 seconds.
 
 Note: the lightning ball effects are precached on map load, so change the map once after installing
 or hot-loading the plugin.

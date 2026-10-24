@@ -35,6 +35,11 @@ namespace ZeusOnlyMode
         [JsonPropertyName("SuperZeusKnockbackForce")]
         public float SuperZeusKnockbackForce { get; set; } = 600.0f;
 
+        // How hard a lightning ball kill flings the enemy's ragdoll
+        // (horizontal speed along the ball's path, plus 30% of it upward).
+        [JsonPropertyName("LightningBallLaunchSpeed")]
+        public float LightningBallLaunchSpeed { get; set; } = 2400.0f;
+
         // Taser rocket jump: a zap that terminates on world geometry near
         // you launches you away from the impact point. Full force
         // point-blank, fading to zero at RocketJumpMaxDistance units.
