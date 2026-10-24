@@ -1,7 +1,7 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Commands;
-using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.UserMessages;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
@@ -16,43 +16,30 @@ namespace ZeusOnlyMode
         // ------------------------------------------------------------------
         // zeuscolor: a per-player menu for the color of their primary zap
         // and their alt-fire lightning ball. Same shape as SimpleVote's menus:
-        // a center-screen panel fed every tick, picked by chatting a number
-        // (hidden), 0 for the next page, "cancel" to close. Choices persist
-        // per SteamID in configs/plugins/ZeusOnlyMode/zeus_colors.json.
+        // a center-screen panel fed every tick plus a chat list, picked by
+        // chatting a number (hidden), 8/9 to page up/down, 0 or "cancel" to
+        // close. Every option is shown in its own color. Choices persist per
+        // SteamID in configs/plugins/ZeusOnlyMode/zeus_colors.json.
         // ------------------------------------------------------------------
 
-        private sealed record ZeusColorOption(string Key, string Name, Color Color, bool Rainbow = false);
+        // Chat is the closest CS2 chat color (chat has fewer colors than the
+        // panel: Orange and Gold share one code)
+        private sealed record ZeusColorOption(string Key, string Name, Color Color, char Chat);
 
         private static readonly ZeusColorOption[] ZeusColorOptions =
         {
-            new("default", "Electric Blue (Default)", Color.FromArgb(120, 190, 255)),
-            new("rainbow", "Rainbow", Color.White, Rainbow: true),
-            new("white", "White", Color.FromArgb(255, 255, 255)),
-            new("red", "Red", Color.FromArgb(255, 40, 40)),
-            new("crimson", "Crimson", Color.FromArgb(200, 10, 50)),
-            new("orange", "Orange", Color.FromArgb(255, 130, 20)),
-            new("gold", "Gold", Color.FromArgb(255, 200, 40)),
-            new("yellow", "Yellow", Color.FromArgb(255, 245, 60)),
-            new("lime", "Lime", Color.FromArgb(170, 255, 40)),
-            new("green", "Green", Color.FromArgb(40, 220, 60)),
-            new("emerald", "Emerald", Color.FromArgb(20, 200, 120)),
-            new("mint", "Mint", Color.FromArgb(120, 255, 190)),
-            new("teal", "Teal", Color.FromArgb(20, 190, 180)),
-            new("cyan", "Cyan", Color.FromArgb(40, 240, 255)),
-            new("sky", "Sky Blue", Color.FromArgb(110, 200, 255)),
-            new("blue", "Blue", Color.FromArgb(40, 80, 255)),
-            new("royal", "Royal Blue", Color.FromArgb(70, 100, 230)),
-            new("indigo", "Indigo", Color.FromArgb(90, 40, 220)),
-            new("purple", "Purple", Color.FromArgb(150, 50, 230)),
-            new("violet", "Violet", Color.FromArgb(200, 110, 255)),
-            new("magenta", "Magenta", Color.FromArgb(255, 40, 220)),
-            new("hotpink", "Hot Pink", Color.FromArgb(255, 70, 160)),
-            new("pink", "Pink", Color.FromArgb(255, 150, 200)),
-            new("rose", "Rose", Color.FromArgb(255, 90, 120)),
-            new("silver", "Silver", Color.FromArgb(190, 200, 215)),
+            new("red", "Red", Color.FromArgb(255, 40, 40), ChatColors.Red),
+            new("orange", "Orange", Color.FromArgb(255, 135, 25), ChatColors.Orange),
+            new("yellow", "Yellow", Color.FromArgb(255, 240, 60), ChatColors.Yellow),
+            new("green", "Green", Color.FromArgb(50, 220, 70), ChatColors.Green),
+            new("default", "Blue (Default)", Color.FromArgb(90, 160, 255), ChatColors.Blue),
+            new("purple", "Purple", Color.FromArgb(160, 60, 235), ChatColors.Purple),
+            new("pink", "Pink", Color.FromArgb(255, 120, 200), ChatColors.LightRed),
+            new("gold", "Gold", Color.FromArgb(255, 200, 40), ChatColors.Gold),
+            new("silver", "Silver", Color.FromArgb(195, 205, 220), ChatColors.Silver),
         };
 
-        private const int ColorsPerPage = 7;
+        private const int ColorsPerPage = 5;
         private const float ColorMenuIdleSeconds = 30f;
 
         private sealed class ZeusColorPrefs
@@ -114,6 +101,12 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventWeaponFire>(OnZapFired);
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
 
+            int fireBulletsId = UserMessage.FindIdByName("CMsgTEFireBullets");
+            if (fireBulletsId > 0)
+                HookUserMessage(fireBulletsId, OnFireBullets, HookMode.Pre);
+            else
+                Logger.LogWarning("CMsgTEFireBullets not found; the stock zap can't be hidden for colored zaps.");
+
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
             RegisterListener<Listeners.OnTick>(() =>
             {
@@ -150,8 +143,8 @@ namespace ZeusOnlyMode
 
         // --- Colored primary zap -------------------------------------------
         //
-        // The stock zap still plays as normal; players who picked a zap color
-        // also get a colored copy of it laid over the top (ColorZap below).
+        // Players who picked a zap color get a colored copy of the stock zap
+        // (ColorZap below), and the stock one is hidden from everyone else.
         // weapon_fire marks the shot; the game's bullet_impact for it gives
         // the exact end point. Players on Default see only the stock zap.
 
@@ -186,6 +179,56 @@ namespace ZeusOnlyMode
             });
 
             return HookResult.Continue;
+        }
+
+        // Hide the stock zap for colored shooters. Other players draw a shot's
+        // tracer, muzzle flash and sound from the server's FireBullets message,
+        // so withholding it for a colored zap leaves only the colored copy;
+        // the shot sound is replayed to the same players so it isn't silent.
+        // The shooter's own client predicts its zap locally, which no server
+        // can suppress, so the shooter still sees the stock zap themselves.
+        private const uint TaserItemDefIndex = 31;
+
+        private HookResult OnFireBullets(UserMessage message)
+        {
+            if (!message.HasField("item_def_index") || message.ReadUInt("item_def_index") != TaserItemDefIndex)
+                return HookResult.Continue;
+
+            var shooter = message.HasField("player") ? FindPlayerByHandle(message.ReadUInt("player")) : null;
+            if (shooter == null || GetZeusColor(shooter, alt: false) == null)
+                return HookResult.Continue;
+
+            var pawn = shooter.PlayerPawn.Value;
+            if (pawn != null && pawn.IsValid)
+            {
+                var listeners = new RecipientFilter();
+                foreach (var p in message.Recipients)
+                    if (p != null && p.IsValid && p.Slot != shooter.Slot)
+                        listeners.Add(p);
+
+                if (listeners.Count > 0)
+                    pawn.EmitSound("Weapon_Taser.Single", listeners);
+            }
+
+            return HookResult.Stop;
+        }
+
+        // The message names the shooter by entity handle; accept either the
+        // pawn's or the controller's, by full handle or by entity index
+        private static CCSPlayerController? FindPlayerByHandle(uint handle)
+        {
+            uint index = handle & 0x7FFF;
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player == null || !player.IsValid)
+                    continue;
+
+                var pawn = player.PlayerPawn.Value;
+                if (player.EntityHandle.Raw == handle || player.PlayerPawn.Raw == handle
+                    || player.Index == index || (pawn != null && pawn.Index == index))
+                    return player;
+            }
+            return null;
         }
 
         private HookResult OnZapImpact(EventBulletImpact ev, GameEventInfo info)
@@ -225,7 +268,7 @@ namespace ZeusOnlyMode
         // shapes and timing out of beams in the player's color and lays them
         // over the stock zap.
 
-        private const int ZapWireSegments = 8;
+        private const int ZapWireSegments = 16;
         private const float ZapLifetime = 1.8f;
         private const float ZapCrackleSeconds = 0.2f;
         private const float ZapFadeStart = 0.4f;
@@ -251,16 +294,24 @@ namespace ZeusOnlyMode
                 this.gravity = gravity;
                 startTime = Server.CurrentTime;
 
+                // One smooth bow per wire (like the rope's path bulge), never a
+                // per-point kink, so the wire reads as a soft curve
+                var span = end - start;
+                var side = Vector3.Cross(span, Vector3.UnitZ);
+                if (side.LengthSquared() < 0.01f) side = Vector3.UnitX;
+                side = Vector3.Normalize(side) * (plugin.rng.NextSingle() * 2f - 1f) + Vector3.UnitZ * (plugin.rng.NextSingle() * 0.6f);
+                side = Vector3.Normalize(side) * 6f;
+
                 basePoints = new Vector3[ZapWireSegments + 1];
                 bulge = new Vector3[ZapWireSegments + 1];
                 for (int i = 0; i <= ZapWireSegments; i++)
                 {
                     float t = i / (float)ZapWireSegments;
                     basePoints[i] = Vector3.Lerp(start, end, t);
-                    bulge[i] = plugin.RandomUnit() * 6f * MathF.Sin(t * MathF.PI);
+                    bulge[i] = side * MathF.Sin(t * MathF.PI);
                 }
 
-                var points = PointsAt(0f, false);
+                var points = PointsAt(0f);
                 for (int i = 0; i < ZapWireSegments; i++)
                 {
                     var c = CreateBeam(points[i], points[i + 1], CrackleColor(i, 1f), 1f);
@@ -281,7 +332,7 @@ namespace ZeusOnlyMode
                 }
 
                 bool crackling = age < ZapCrackleSeconds;
-                var points = PointsAt(age, crackling);
+                var points = PointsAt(age);
 
                 float crackleFade = crackling ? 1f - age / ZapCrackleSeconds : 0f;
                 float wireFade = age < ZapFadeStart ? 1f : 1f - (age - ZapFadeStart) / (ZapLifetime - ZapFadeStart);
@@ -318,8 +369,8 @@ namespace ZeusOnlyMode
             }
 
             // Sag grows like a falling rope, strongest mid-span and pinned at
-            // both ends; the crackle jitters the interior points while it lasts
-            private Vector3[] PointsAt(float age, bool jitter)
+            // both ends, so the wire stays a smooth curve as it drops
+            private Vector3[] PointsAt(float age)
             {
                 float sag = Math.Min(0.5f * gravity * age * age, ZapMaxSag);
                 var points = new Vector3[ZapWireSegments + 1];
@@ -327,24 +378,14 @@ namespace ZeusOnlyMode
                 {
                     float weight = MathF.Sin(i / (float)ZapWireSegments * MathF.PI);
                     points[i] = basePoints[i] + bulge[i] - new Vector3(0f, 0f, sag * weight);
-                    if (jitter && i > 0 && i < ZapWireSegments)
-                        points[i] += plugin.RandomUnit() * 1.5f;
                 }
                 return points;
             }
 
             // Additive beams fade by scaling toward black
-            private Color CrackleColor(int segment, float fade) =>
-                Scale(Whiten(ResolveColor(color, segment / (float)ZapWireSegments), 0.35f), fade);
+            private Color CrackleColor(int segment, float fade) => Scale(Whiten(color.Color, 0.35f), fade);
 
-            private Color WireColor(int segment, float fade) =>
-                Scale(ResolveColor(color, segment / (float)ZapWireSegments), 0.45f * fade);
-
-            private static Color Scale(Color c, float f)
-            {
-                f = Math.Clamp(f, 0f, 1f);
-                return Color.FromArgb(255, (int)(c.R * f), (int)(c.G * f), (int)(c.B * f));
-            }
+            private Color WireColor(int segment, float fade) => Scale(color.Color, 0.45f * fade);
 
             private static void MoveBeam(CBeam beam, Vector3 start, Vector3 end, Color color)
             {
@@ -406,30 +447,17 @@ namespace ZeusOnlyMode
         private static ZeusColorOption? FindColorOption(string? key) =>
             key == null ? null : ZeusColorOptions.FirstOrDefault(o => o.Key == key);
 
-        // Rainbow cycles through the hues over time; offset spreads it along a bolt
-        private static Color ResolveColor(ZeusColorOption option, float offset = 0f) =>
-            option.Rainbow ? HueToColor(Server.CurrentTime * 0.5f + offset) : option.Color;
-
-        private static Color HueToColor(float hue)
-        {
-            hue = (hue % 1f + 1f) % 1f * 6f;
-            float x = 1f - Math.Abs(hue % 2f - 1f);
-            var (r, g, b) = (int)hue switch
-            {
-                0 => (1f, x, 0f),
-                1 => (x, 1f, 0f),
-                2 => (0f, 1f, x),
-                3 => (0f, x, 1f),
-                4 => (x, 0f, 1f),
-                _ => (1f, 0f, x)
-            };
-            return Color.FromArgb(255, (int)(r * 255), (int)(g * 255), (int)(b * 255));
-        }
-
         private static Color Whiten(Color c, float amount) => Color.FromArgb(255,
             (int)(c.R + (255 - c.R) * amount),
             (int)(c.G + (255 - c.G) * amount),
             (int)(c.B + (255 - c.B) * amount));
+
+        // Additive beams fade (and darken) by scaling toward black
+        private static Color Scale(Color c, float f)
+        {
+            f = Math.Clamp(f, 0f, 1f);
+            return Color.FromArgb(255, (int)(c.R * f), (int)(c.G * f), (int)(c.B * f));
+        }
 
         private static string Hex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 
@@ -439,7 +467,7 @@ namespace ZeusOnlyMode
         {
             colorMenus[player.Slot] = new ColorMenuState { ExpireAt = Server.CurrentTime + ColorMenuIdleSeconds };
             RefreshColorMenu(player);
-            player.PrintToChat($" {ChatColors.Gold}Zeus Color{ChatColors.Default}: chat a {ChatColors.Green}number{ChatColors.Default} to choose, or {ChatColors.Green}cancel{ChatColors.Default} to close.");
+            player.PrintToChat($" {ChatColors.Gold}Zeus Color{ChatColors.Default}: chat {ChatColors.Green}1{ChatColors.Default} Zap, {ChatColors.Green}2{ChatColors.Default} Lightning Ball, {ChatColors.Green}3{ChatColors.Default} Both, or {ChatColors.Green}0{ChatColors.Default} to close.");
         }
 
         private void CloseColorMenu(CCSPlayerController player)
@@ -479,15 +507,25 @@ namespace ZeusOnlyMode
                 }
                 menu.Page = 0;
                 RefreshColorMenu(player);
+                PrintColorPageToChat(player, menu);
                 return true;
             }
 
-            int pages = (ZeusColorOptions.Length + ColorsPerPage - 1) / ColorsPerPage;
-            if (choice == 0)
+            switch (choice)
             {
-                menu.Page = (menu.Page + 1) % pages;
-                RefreshColorMenu(player);
-                return true;
+                case 0:
+                    CloseColorMenu(player);
+                    return true;
+                case 8: // page up
+                    menu.Page = Math.Max(0, menu.Page - 1);
+                    RefreshColorMenu(player);
+                    PrintColorPageToChat(player, menu);
+                    return true;
+                case 9: // page down
+                    menu.Page = Math.Min(ColorPageCount - 1, menu.Page + 1);
+                    RefreshColorMenu(player);
+                    PrintColorPageToChat(player, menu);
+                    return true;
             }
 
             int index = menu.Page * ColorsPerPage + choice - 1;
@@ -514,7 +552,24 @@ namespace ZeusOnlyMode
                 ColorMenuTarget.Alt => "lightning ball",
                 _ => "Zeus zap and lightning ball"
             };
-            player.PrintToChat($" {ChatColors.Default}Your {what} color is now {ChatColors.Green}{option.Name}{ChatColors.Default}.");
+            player.PrintToChat($" {ChatColors.Default}Your {what} color is now {option.Chat}{option.Name}{ChatColors.Default}.");
+        }
+
+        private static int ColorPageCount => (ZeusColorOptions.Length + ColorsPerPage - 1) / ColorsPerPage;
+
+        // The chat side of the menu, like SimpleVote's nomination list
+        private static void PrintColorPageToChat(CCSPlayerController player, ColorMenuState menu)
+        {
+            player.PrintToChat($" {ChatColors.Default}Page {menu.Page + 1}/{ColorPageCount}. Type a number to choose:");
+
+            int start = menu.Page * ColorsPerPage;
+            for (int i = start; i < Math.Min(start + ColorsPerPage, ZeusColorOptions.Length); i++)
+            {
+                var option = ZeusColorOptions[i];
+                player.PrintToChat($" {option.Chat}[{i - start + 1}] {option.Name}");
+            }
+
+            player.PrintToChat($" {ChatColors.Grey}[8] Page Up  [9] Page Down  [0] Close");
         }
 
         private void RefreshColorMenu(CCSPlayerController player)
@@ -541,34 +596,28 @@ namespace ZeusOnlyMode
                 return sb.ToString();
             }
 
-            int pages = (ZeusColorOptions.Length + ColorsPerPage - 1) / ColorsPerPage;
             string title = menu.Target switch
             {
                 ColorMenuTarget.Primary => "Zap Color",
                 ColorMenuTarget.Alt => "Lightning Ball Color",
                 _ => "Zap + Ball Color"
             };
-            sb.Append($"<font color='#FFD700'><b>{title} - page {menu.Page + 1}/{pages}</b></font>");
+            sb.Append($"<font color='#FFD700'><b>{title} - page {menu.Page + 1}/{ColorPageCount}</b></font>");
 
+            // Each whole row, number included, is drawn in its own color
             int start = menu.Page * ColorsPerPage;
             for (int i = start; i < Math.Min(start + ColorsPerPage, ZeusColorOptions.Length); i++)
-                sb.Append($"<br><font color='#FF5722'>{i - start + 1}:</font> {ColoredName(ZeusColorOptions[i])}");
+            {
+                var option = ZeusColorOptions[i];
+                sb.Append($"<br><font color='{Hex(option.Color)}'>{i - start + 1}: {option.Name}</font>");
+            }
 
-            sb.Append("<br><font color='#FF5722'>0:</font> <font color='#9E9E9E'>Next Page</font>");
+            sb.Append("<br><font color='#9E9E9E'>8: Page Up   9: Page Down   0: Close</font>");
             return sb.ToString();
         }
 
-        // Each name is drawn in its own color; Rainbow gets one hue per letter
-        private static string ColoredName(ZeusColorOption option)
-        {
-            if (!option.Rainbow)
-                return $"<font color='{Hex(option.Color)}'>{option.Name}</font>";
-
-            var sb = new StringBuilder();
-            for (int i = 0; i < option.Name.Length; i++)
-                sb.Append($"<font color='{Hex(HueToColor(i / (float)option.Name.Length))}'>{option.Name[i]}</font>");
-            return sb.ToString();
-        }
+        private static string ColoredName(ZeusColorOption option) =>
+            $"<font color='{Hex(option.Color)}'>{option.Name}</font>";
 
         // The center panel only stays up while it keeps being fed, so re-send
         // every tick (the same approach SimpleVote's vote panel uses)

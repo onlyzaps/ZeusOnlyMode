@@ -23,10 +23,14 @@ Super Zeus works with or without Zeus Only Mode.
 Zeus Colors
 -----------
 Any player can type zeuscolor (with or without ! or /) in chat, or zeuscolor in console, to open a
-menu and pick the color of their Zeus zap, their lightning ball, or both. Chat the number of an
-option to choose it, 0 for the next page, or cancel to close. Choices are remembered per player in
+menu and pick the color of their Zeus zap, their lightning ball, or both: Red, Orange, Yellow, Green,
+Blue (Default), Purple, Pink, Gold or Silver. Chat the number of an option to choose it, 8 / 9 to page
+up / down, or 0 to close. Choices are remembered per player in
 addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/zeus_colors.json. Super Zeus does not need
 to be on to color your zap.
+
+A colored zap replaces the stock zap for everyone else (the shooter's own game always draws the
+stock zap locally on top). A colored lightning ball is drawn with colored rays, a tail and sparks.
 
 Note: the lightning ball effects are precached on map load, so change the map once after installing
 or hot-loading the plugin.
