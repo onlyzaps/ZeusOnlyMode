@@ -6,8 +6,10 @@ using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Entities.Constants;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
+using Microsoft.Extensions.Logging;
 using System.Drawing;
 using System.Globalization;
+using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
 
 namespace ZeusOnlyMode
@@ -19,7 +21,7 @@ namespace ZeusOnlyMode
         private const float BallSpeed = 1500f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
-        private const float BallHitRadius = 30f;
+        private const float BallHitRadius = 36f;
         private const float BallTickLookahead = 1f / 64f; // one server tick of travel
 
         // How hard a lightning ball kill flings the enemy's ragdoll
@@ -113,6 +115,7 @@ namespace ZeusOnlyMode
                 lastButtons.Clear();
                 pendingRecharges.Clear();
                 taserRechargeCvar = null;
+                teammatesAreEnemiesCvar = null;
             });
             RegisterEventHandler<EventRoundStart>((ev, info) =>
             {
@@ -359,7 +362,7 @@ namespace ZeusOnlyMode
 
             if (colored)
             {
-                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 4f, 0.4f);
+                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color), 1f, 0.1f);
                 if (tail != null) ball.Tail = HandleOf(tail);
             }
 
@@ -436,21 +439,29 @@ namespace ZeusOnlyMode
             var hit = FindHitPlayer(ball, ball.LastPosition, pos + ball.Velocity * BallTickLookahead);
             if (hit != null)
             {
-                if (hit.TeamNum != ball.OwnerTeam)
+                if (IsEnemy(hit, ball))
+                {
+                    LogBallEnd(ball, pos, $"hit enemy {hit.PlayerName}");
                     StrikeVictim(hit, ball);
+                }
                 else
+                {
+                    LogBallEnd(ball, pos, $"dissipated on teammate {hit.PlayerName}");
                     WallBurst(pos); // teammates are never hurt; the ball just dissipates
+                }
                 return false;
             }
 
             if (projectile.Bounces > 0)
             {
+                LogBallEnd(ball, pos, "hit a wall");
                 WallBurst(pos);
                 return false;
             }
 
             if (Server.CurrentTime >= ball.ExpireTime)
             {
+                LogBallEnd(ball, pos, "timed out");
                 SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
                 SpawnParticle(FxImpactArcs, pos, Vector3.Zero, 1f);
                 return false;
@@ -502,6 +513,48 @@ namespace ZeusOnlyMode
             return true;
         }
 
+        private ConVar? teammatesAreEnemiesCvar;
+
+        // Different team, or any other player when teammates are enemies
+        // (free-for-all deathmatch and similar modes)
+        private bool IsEnemy(CCSPlayerController player, LightningBall ball)
+        {
+            if (player.TeamNum != ball.OwnerTeam)
+                return true;
+
+            teammatesAreEnemiesCvar ??= ConVar.Find("mp_teammates_are_enemies");
+            return teammatesAreEnemiesCvar?.StringValue is "1" or "true";
+        }
+
+        // One console line per ball saying how it ended and where the nearest
+        // player was, so a ball that "didn't hit" can be diagnosed from the log
+        private void LogBallEnd(LightningBall ball, Vector3 pos, string outcome)
+        {
+            string nearest = "no other players";
+            float best = float.MaxValue;
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player == null || !player.IsValid || player.Slot == ball.OwnerSlot)
+                    continue;
+
+                var origin = player.PlayerPawn.Value?.AbsOrigin;
+                if (origin == null)
+                    continue;
+
+                var feet = ToVec3(origin);
+                float horizontal = new Vector2(pos.X - feet.X, pos.Y - feet.Y).Length();
+                if (horizontal < best)
+                {
+                    best = horizontal;
+                    nearest = $"nearest {player.PlayerName} (team {player.TeamNum}, alive {player.PawnIsAlive}) "
+                            + $"{horizontal:0} units away, {pos.Z - feet.Z:0} above their feet";
+                }
+            }
+
+            Logger.LogInformation("[SuperZeus] Ball from slot {Slot} (team {Team}) {Outcome}; {Nearest}",
+                ball.OwnerSlot, ball.OwnerTeam, outcome, nearest);
+        }
+
         // Any living player (other than the shooter) the ball passed through this tick
         private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to)
         {
@@ -521,7 +574,7 @@ namespace ZeusOnlyMode
                 float dy = closest.Y - feet.Y;
 
                 if (dx * dx + dy * dy <= BallHitRadius * BallHitRadius
-                    && closest.Z >= feet.Z - 8f && closest.Z <= feet.Z + 80f)
+                    && closest.Z >= feet.Z - 16f && closest.Z <= feet.Z + 88f)
                     return player;
             }
 
@@ -638,7 +691,7 @@ namespace ZeusOnlyMode
                 var vel = ball.Velocity * 0.1f + RandomUnit() * (140f + rng.NextSingle() * 260f) + new Vector3(0f, 0f, 60f);
                 var color = ball.Color!.Color;
 
-                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.2f, 0.05f);
+                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.2f);
                 if (beam == null) return;
 
                 float now = Server.CurrentTime;
@@ -783,8 +836,8 @@ namespace ZeusOnlyMode
             light.DirectLight = 3; // dynamic
             light.CastShadows = 0;
             light.Color = color;
-            light.Brightness = 0.35f;
-            light.Range = 140f;
+            light.Brightness = 0.06f;
+            light.Range = 90f;
             light.InnerAngle = 180f;
             light.OuterAngle = 180f;
             light.Teleport(pos, Vector3.Zero, Vector3.Zero);
