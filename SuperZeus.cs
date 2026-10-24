@@ -3,6 +3,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
+using CounterStrikeSharp.API.Modules.Entities.Constants;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using System.Drawing;
@@ -18,7 +19,8 @@ namespace ZeusOnlyMode
         private const float BallSpeed = 1500f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
-        private const float BallHitRadius = 28f;
+        private const float BallHitRadius = 30f;
+        private const float BallTickLookahead = 1f / 64f; // one server tick of travel
 
         // How hard a lightning ball kill flings the enemy's ragdoll
         // (horizontal speed along the ball's path, plus 30% of it upward)
@@ -314,8 +316,10 @@ namespace ZeusOnlyMode
             projectile.OriginalThrower.Raw = pawn.EntityHandle.Raw;
             projectile.OwnerEntity.Raw = pawn.EntityHandle.Raw;
             projectile.RenderMode = RenderMode_t.kRenderNone;
+            SetDebrisCollision(projectile);
             projectile.DispatchSpawn();
             projectile.SetModel(BallCarrierModel); // guarantees a physics hull for wall collision
+            SetDebrisCollision(projectile);
             projectile.GravityScale = 0.001f;
             projectile.Teleport(spawnPos, angles, velocity);
 
@@ -374,6 +378,21 @@ namespace ZeusOnlyMode
             KickZeus(zeus);
         }
 
+        // Debris only collides with the world, so the carrier flies through
+        // players instead of bouncing off or wedging against them; whether a
+        // player is hit is decided by FindHitPlayer alone
+        private static void SetDebrisCollision(CBaseEntity entity)
+        {
+            var collision = entity.Collision;
+            if (collision == null)
+                return;
+
+            collision.CollisionGroup = (byte)CollisionGroup.COLLISION_GROUP_DEBRIS;
+            collision.CollisionAttribute.CollisionGroup = (byte)CollisionGroup.COLLISION_GROUP_DEBRIS;
+            Utilities.SetStateChanged(entity, "CCollisionProperty", "m_CollisionGroup");
+            Utilities.SetStateChanged(entity, "CCollisionProperty", "m_collisionAttribute");
+        }
+
         // Recoil the zeus itself (not the camera): put the weapon into its
         // shoot gameplay-anim state with a fresh timestamp, which makes the
         // client play the zeus's real firing kick on the first-person and
@@ -414,7 +433,7 @@ namespace ZeusOnlyMode
 
             var pos = ToVec3(projectile.AbsOrigin);
 
-            var hit = FindHitPlayer(ball, ball.LastPosition, pos);
+            var hit = FindHitPlayer(ball, ball.LastPosition, pos + ball.Velocity * BallTickLookahead);
             if (hit != null)
             {
                 if (hit.TeamNum != ball.OwnerTeam)
@@ -619,7 +638,7 @@ namespace ZeusOnlyMode
                 var vel = ball.Velocity * 0.1f + RandomUnit() * (140f + rng.NextSingle() * 260f) + new Vector3(0f, 0f, 60f);
                 var color = ball.Color!.Color;
 
-                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.2f);
+                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.2f, 0.05f);
                 if (beam == null) return;
 
                 float now = Server.CurrentTime;

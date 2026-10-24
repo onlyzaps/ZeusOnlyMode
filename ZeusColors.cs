@@ -202,7 +202,7 @@ namespace ZeusOnlyMode
         // (DampenToCP: 25 unit range, faded out between 0.25s and 0.5s),
         // pinned within 8 units of either end, and stopped by the world.
         // What you actually see is the crackle rope riding them (wire2):
-        // it appears 0.05s after the shot, lives 0.4s, is thickest mid-span
+        // it lives 0.4s, is thickest mid-span
         // and thin at both ends, thins to 35% over its life, fades over its
         // last 0.1s, and is smoothly tessellated. The colors are baked into
         // the particle files, so the same rope is drawn here out of beams in
@@ -212,7 +212,7 @@ namespace ZeusOnlyMode
 
         private const int ZapWirePoints = 15;
         private const int ZapSubdivisions = 2;          // spline samples between carrier points
-        private const float ZapRopeDelay = 0.05f;
+        private const float ZapRopeDelay = 0f;
         private const float ZapRopeLife = 0.4f;
         private const float ZapRopeFade = 0.1f;
         private const float ZapRopeEndScale = 0.35f;
@@ -264,6 +264,9 @@ namespace ZeusOnlyMode
                     points[i] = Vector3.Lerp(start, end, t) + side * bulge * MathF.Sin(t * MathF.PI);
                     locked[i] = Vector3.Distance(points[i], start) < ZapLockRange || Vector3.Distance(points[i], end) < ZapLockRange;
                 }
+
+                // Draw the first frame right away rather than on the next tick
+                Update();
             }
 
             // Returns false once the rope has faded
