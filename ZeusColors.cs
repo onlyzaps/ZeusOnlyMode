@@ -115,6 +115,12 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
 
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
+            RegisterListener<Listeners.OnTick>(() =>
+            {
+                if (colorZaps.Count > 0)
+                    UpdateColorZaps();
+            });
+            RegisterListener<Listeners.OnMapStart>(_ => colorZaps.Clear());
             RegisterListener<Listeners.OnClientDisconnect>(slot =>
             {
                 colorMenus.Remove(slot);
@@ -144,11 +150,10 @@ namespace ZeusOnlyMode
 
         // --- Colored primary zap -------------------------------------------
         //
-        // The stock zap tracer is drawn by the client and can't be recolored,
-        // so players who picked a zap color get a lightning bolt of that color
-        // drawn along their shot. weapon_fire marks the shot; the game's
-        // bullet_impact for it gives the exact end point. Players on Default
-        // keep the stock look untouched.
+        // The stock zap still plays as normal; players who picked a zap color
+        // also get a colored copy of it laid over the top (ColorZap below).
+        // weapon_fire marks the shot; the game's bullet_impact for it gives
+        // the exact end point. Players on Default see only the stock zap.
 
         private const float StockZeusRange = 190f;
         private readonly HashSet<int> pendingZaps = new();
@@ -204,9 +209,193 @@ namespace ZeusOnlyMode
             AngleVectors(new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0f), out var forward, out var right, out var up);
             var muzzle = eye + forward * 16f + right * (pawn.LeftHanded ? -5f : 5f) - up * 6f;
 
-            // Two quick strokes with different shapes, like the ball's kill bolt
-            DrawLightningBolt(muzzle, end, 0.07f, color, 0.35f, false);
-            AddTimer(0.07f, () => DrawLightningBolt(muzzle, end, 0.1f, color, 0.35f, false), TimerFlags.STOP_ON_MAPCHANGE);
+            // Same two wires the stock zap draws (weapon_tracers_taser_wire1a/b),
+            // each falling under its own gravity
+            colorZaps.Add(new ColorZap(this, muzzle, end, color, 350f));
+            colorZaps.Add(new ColorZap(this, muzzle, end, color, 500f));
+
+            // Stock zap glows where it lands (weapon_taser_glow_impact)
+            var flash = SpawnZapFlash(end, ResolveColor(color));
+            if (flash != null)
+                RemoveLater(HandleOf(flash), ZapCrackleSeconds);
+        }
+
+        // --- Colored copy of the stock zap ----------------------------------
+        //
+        // The stock zap (weapon_tracers_taser) is two wire ropes strung from
+        // the muzzle to the impact point: they bulge slightly, sag under
+        // gravity pinned at both ends, and fade out over 1.8s, while a bright
+        // crackle rope (wire2) flashes along them for the first instant. Its
+        // colors are baked into the particle files, so this rebuilds the same
+        // shapes and timing out of beams in the player's color and lays them
+        // over the stock zap.
+
+        private const int ZapWireSegments = 8;
+        private const float ZapLifetime = 1.8f;
+        private const float ZapCrackleSeconds = 0.2f;
+        private const float ZapFadeStart = 0.4f;
+        private const float ZapMaxSag = 120f;
+
+        private readonly List<ColorZap> colorZaps = new();
+
+        private sealed class ColorZap
+        {
+            private readonly ZeusOnlyPlugin plugin;
+            private readonly Vector3[] basePoints;
+            private readonly Vector3[] bulge;
+            private readonly List<CHandle<CBeam>> crackle = new();
+            private readonly List<CHandle<CBeam>> wire = new();
+            private readonly ZeusColorOption color;
+            private readonly float gravity;
+            private readonly float startTime;
+
+            public ColorZap(ZeusOnlyPlugin plugin, Vector3 start, Vector3 end, ZeusColorOption color, float gravity)
+            {
+                this.plugin = plugin;
+                this.color = color;
+                this.gravity = gravity;
+                startTime = Server.CurrentTime;
+
+                basePoints = new Vector3[ZapWireSegments + 1];
+                bulge = new Vector3[ZapWireSegments + 1];
+                for (int i = 0; i <= ZapWireSegments; i++)
+                {
+                    float t = i / (float)ZapWireSegments;
+                    basePoints[i] = Vector3.Lerp(start, end, t);
+                    bulge[i] = plugin.RandomUnit() * 6f * MathF.Sin(t * MathF.PI);
+                }
+
+                var points = PointsAt(0f, false);
+                for (int i = 0; i < ZapWireSegments; i++)
+                {
+                    var c = CreateBeam(points[i], points[i + 1], CrackleColor(i, 1f), 2f);
+                    if (c != null) crackle.Add(HandleOf(c));
+                    var w = CreateBeam(points[i], points[i + 1], WireColor(i, 1f), 0.6f);
+                    if (w != null) wire.Add(HandleOf(w));
+                }
+            }
+
+            // Returns false once the zap has fully faded
+            public bool Update()
+            {
+                float age = Server.CurrentTime - startTime;
+                if (age >= ZapLifetime)
+                {
+                    Destroy();
+                    return false;
+                }
+
+                bool crackling = age < ZapCrackleSeconds;
+                var points = PointsAt(age, crackling);
+
+                float crackleFade = crackling ? 1f - age / ZapCrackleSeconds : 0f;
+                float wireFade = age < ZapFadeStart ? 1f : 1f - (age - ZapFadeStart) / (ZapLifetime - ZapFadeStart);
+
+                for (int i = 0; i < ZapWireSegments; i++)
+                {
+                    if (i < crackle.Count)
+                    {
+                        var c = crackle[i].Value;
+                        if (c != null && c.IsValid)
+                        {
+                            if (crackling)
+                                MoveBeam(c, points[i], points[i + 1], CrackleColor(i, crackleFade));
+                            else
+                                c.Remove();
+                        }
+                    }
+
+                    if (i < wire.Count)
+                    {
+                        var w = wire[i].Value;
+                        if (w != null && w.IsValid)
+                            MoveBeam(w, points[i], points[i + 1], WireColor(i, wireFade));
+                    }
+                }
+
+                return true;
+            }
+
+            public void Destroy()
+            {
+                foreach (var beam in crackle) RemoveEntity(beam);
+                foreach (var beam in wire) RemoveEntity(beam);
+            }
+
+            // Sag grows like a falling rope, strongest mid-span and pinned at
+            // both ends; the crackle jitters the interior points while it lasts
+            private Vector3[] PointsAt(float age, bool jitter)
+            {
+                float sag = Math.Min(0.5f * gravity * age * age, ZapMaxSag);
+                var points = new Vector3[ZapWireSegments + 1];
+                for (int i = 0; i <= ZapWireSegments; i++)
+                {
+                    float weight = MathF.Sin(i / (float)ZapWireSegments * MathF.PI);
+                    points[i] = basePoints[i] + bulge[i] - new Vector3(0f, 0f, sag * weight);
+                    if (jitter && i > 0 && i < ZapWireSegments)
+                        points[i] += plugin.RandomUnit() * 1.5f;
+                }
+                return points;
+            }
+
+            // Additive beams fade by scaling toward black
+            private Color CrackleColor(int segment, float fade) =>
+                Scale(Whiten(ResolveColor(color, segment / (float)ZapWireSegments), 0.35f), fade);
+
+            private Color WireColor(int segment, float fade) =>
+                Scale(ResolveColor(color, segment / (float)ZapWireSegments), 0.45f * fade);
+
+            private static Color Scale(Color c, float f)
+            {
+                f = Math.Clamp(f, 0f, 1f);
+                return Color.FromArgb(255, (int)(c.R * f), (int)(c.G * f), (int)(c.B * f));
+            }
+
+            private static void MoveBeam(CBeam beam, Vector3 start, Vector3 end, Color color)
+            {
+                beam.Teleport(start, Vector3.Zero, Vector3.Zero);
+                SetBeamEnd(beam, end, true);
+                beam.Render = color;
+                Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
+            }
+        }
+
+        private void UpdateColorZaps()
+        {
+            for (int i = colorZaps.Count - 1; i >= 0; i--)
+                if (!colorZaps[i].Update())
+                    colorZaps.RemoveAt(i);
+        }
+
+        private void ClearColorZaps()
+        {
+            foreach (var zap in colorZaps)
+                zap.Destroy();
+            colorZaps.Clear();
+        }
+
+        private static COmniLight? SpawnZapFlash(Vector3 pos, Color color)
+        {
+            var light = Utilities.CreateEntityByName<COmniLight>("light_omni2");
+            if (light == null)
+                return null;
+
+            light.Enabled = true;
+            light.DirectLight = 3; // dynamic
+            light.CastShadows = 0;
+            light.Color = color;
+            light.Brightness = 2f;
+            light.Range = 140f;
+            light.InnerAngle = 180f;
+            light.OuterAngle = 180f;
+            light.Teleport(pos, Vector3.Zero, Vector3.Zero);
+            light.DispatchSpawn();
+            return light;
+        }
+
+        private void UnloadZeusColors()
+        {
+            ClearColorZaps();
         }
 
         private void SaveZeusColors()

@@ -387,6 +387,7 @@ namespace ZeusOnlyMode
             zeusReminderTimer = null;
 
             UnloadSuperZeus();
+            UnloadZeusColors();
         }
     }
 }
