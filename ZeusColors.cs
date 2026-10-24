@@ -213,11 +213,6 @@ namespace ZeusOnlyMode
             // each falling under its own gravity
             colorZaps.Add(new ColorZap(this, muzzle, end, color, 350f));
             colorZaps.Add(new ColorZap(this, muzzle, end, color, 500f));
-
-            // Stock zap glows where it lands (weapon_taser_glow_impact)
-            var flash = SpawnZapFlash(end, ResolveColor(color));
-            if (flash != null)
-                RemoveLater(HandleOf(flash), ZapCrackleSeconds);
         }
 
         // --- Colored copy of the stock zap ----------------------------------
@@ -268,9 +263,9 @@ namespace ZeusOnlyMode
                 var points = PointsAt(0f, false);
                 for (int i = 0; i < ZapWireSegments; i++)
                 {
-                    var c = CreateBeam(points[i], points[i + 1], CrackleColor(i, 1f), 2f);
+                    var c = CreateBeam(points[i], points[i + 1], CrackleColor(i, 1f), 1f);
                     if (c != null) crackle.Add(HandleOf(c));
-                    var w = CreateBeam(points[i], points[i + 1], WireColor(i, 1f), 0.6f);
+                    var w = CreateBeam(points[i], points[i + 1], WireColor(i, 1f), 0.3f);
                     if (w != null) wire.Add(HandleOf(w));
                 }
             }
@@ -372,25 +367,6 @@ namespace ZeusOnlyMode
             foreach (var zap in colorZaps)
                 zap.Destroy();
             colorZaps.Clear();
-        }
-
-        private static COmniLight? SpawnZapFlash(Vector3 pos, Color color)
-        {
-            var light = Utilities.CreateEntityByName<COmniLight>("light_omni2");
-            if (light == null)
-                return null;
-
-            light.Enabled = true;
-            light.DirectLight = 3; // dynamic
-            light.CastShadows = 0;
-            light.Color = color;
-            light.Brightness = 2f;
-            light.Range = 140f;
-            light.InnerAngle = 180f;
-            light.OuterAngle = 180f;
-            light.Teleport(pos, Vector3.Zero, Vector3.Zero);
-            light.DispatchSpawn();
-            return light;
         }
 
         private void UnloadZeusColors()

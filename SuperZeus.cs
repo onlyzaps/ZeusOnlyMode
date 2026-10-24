@@ -75,6 +75,7 @@ namespace ZeusOnlyMode
             public required CHandle<CDecoyProjectile> Projectile;
             public CHandle<CParticleSystem>? Core;
             public CHandle<COmniLight>? Light;
+            public CHandle<CBeam>? Tail;
             public readonly List<CHandle<CBeam>> Arcs = new();
             public required int OwnerSlot;
             public required byte OwnerTeam;
@@ -297,18 +298,31 @@ namespace ZeusOnlyMode
                 ExpireTime = Server.CurrentTime + BallLifetime
             };
 
-            var core = SpawnParticle(FxBallCore, spawnPos, angles, 0f);
-            if (core != null) ball.Core = HandleOf(core);
+            // The stock particles are baked white-blue and can't be recolored,
+            // so a colored ball drops them and builds its body from colored
+            // arcs plus a colored comet tail instead
+            bool colored = ball.Color != null;
+            if (!colored)
+            {
+                var core = SpawnParticle(FxBallCore, spawnPos, angles, 0f);
+                if (core != null) ball.Core = HandleOf(core);
+            }
 
             var light = SpawnBallLight(spawnPos, BoltGlowColor(ball.Color, 0f));
             if (light != null) ball.Light = HandleOf(light);
 
-            for (int i = 0; i < 4; i++)
+            int arcCount = colored ? ColoredBallArcs : 4;
+            for (int i = 0; i < arcCount; i++)
             {
-                bool isCore = i % 2 == 0;
-                var color = isCore ? BoltCoreColor(ball.Color, i * 0.25f) : BoltGlowColor(ball.Color, i * 0.25f);
-                var arc = CreateBeam(spawnPos, spawnPos, color, isCore ? 1.2f : 2.4f);
+                float width = i % 2 == 0 ? (colored ? 1.6f : 1.2f) : (colored ? 3f : 2.4f);
+                var arc = CreateBeam(spawnPos, spawnPos, BallArcColor(ball, i), width);
                 if (arc != null) ball.Arcs.Add(HandleOf(arc));
+            }
+
+            if (colored)
+            {
+                var tail = CreateBeam(spawnPos, spawnPos, BoltGlowColor(ball.Color, 0f), 4f);
+                if (tail != null) ball.Tail = HandleOf(tail);
             }
 
             lightningBalls.Add(ball);
@@ -403,26 +417,41 @@ namespace ZeusOnlyMode
                 }
             }
 
-            // Re-roll the crackling arcs every tick so the ball constantly writhes
+            // Re-roll the crackling arcs every tick so the ball constantly writhes;
+            // a colored ball's arcs are shorter and denser so they read as its body
+            bool colored = ball.Color != null;
             for (int i = 0; i < ball.Arcs.Count; i++)
             {
                 var arc = ball.Arcs[i].Value;
                 if (arc == null || !arc.IsValid) continue;
 
+                float reach = colored ? 8f + rng.NextSingle() * 14f : 14f + rng.NextSingle() * 14f;
                 arc.Teleport(pos + RandomUnit() * 3f, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(arc, pos + RandomUnit() * (14f + rng.NextSingle() * 14f), true);
+                SetBeamEnd(arc, pos + RandomUnit() * reach, true);
 
                 if (ball.Color?.Rainbow == true)
                 {
-                    arc.Render = i % 2 == 0 ? BoltCoreColor(ball.Color, i * 0.25f) : BoltGlowColor(ball.Color, i * 0.25f);
+                    arc.Render = BallArcColor(ball, i);
                     Utilities.SetStateChanged(arc, "CBaseModelEntity", "m_clrRender");
                 }
             }
 
-            // Spark and glow puffs left behind in the world form the trail
-            if (ball.Age % 4 == 0)
+            var tail = ball.Tail?.Value;
+            if (tail != null && tail.IsValid)
+            {
+                tail.Teleport(pos, Vector3.Zero, Vector3.Zero);
+                SetBeamEnd(tail, pos - Vector3.Normalize(ball.Velocity) * 56f, true);
+                if (ball.Color?.Rainbow == true)
+                {
+                    tail.Render = BoltGlowColor(ball.Color, 0f);
+                    Utilities.SetStateChanged(tail, "CBaseModelEntity", "m_clrRender");
+                }
+            }
+
+            // Spark and glow puffs left behind in the world form the stock trail
+            if (!colored && ball.Age % 4 == 0)
                 SpawnParticle(FxBallSparks, pos, angles, 1f);
-            if (ball.Age % 6 == 0)
+            if (!colored && ball.Age % 6 == 0)
                 SpawnParticle(FxBallGlow, pos, angles, 1f);
 
             ball.LastPosition = pos;
@@ -513,6 +542,18 @@ namespace ZeusOnlyMode
             SpawnParticle(FxImpactDebris, pos, Vector3.Zero, 2f);
             SpawnParticle(FxBallGlow, pos, Vector3.Zero, 2f);
             return flash;
+        }
+
+        private const int ColoredBallArcs = 10;
+
+        // Stock ball: hot whitened cores alternating with blue glow arcs.
+        // Colored ball: barely whitened cores so the color stays saturated.
+        private static Color BallArcColor(LightningBall ball, int index)
+        {
+            float offset = index / (float)ColoredBallArcs;
+            if (index % 2 != 0)
+                return BoltGlowColor(ball.Color, offset);
+            return ball.Color == null ? ArcCoreColor : Whiten(ResolveColor(ball.Color, offset), 0.25f);
         }
 
         // Player color (or the stock blue); offset spreads Rainbow along a bolt
@@ -644,6 +685,7 @@ namespace ZeusOnlyMode
             RemoveEntity(ball.Projectile);
             if (ball.Core != null) RemoveEntity(ball.Core);
             if (ball.Light != null) RemoveEntity(ball.Light);
+            if (ball.Tail != null) RemoveEntity(ball.Tail);
             foreach (var arc in ball.Arcs)
                 RemoveEntity(arc);
         }
