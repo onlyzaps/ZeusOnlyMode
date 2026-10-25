@@ -153,17 +153,14 @@ namespace ZeusOnlyMode
             // makes that a single toggle.
             AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", ConCommand_SuperZeus);
 
-            // Diagnostic: every !/ chat message, as seen by the game's chat event
-            RegisterListener<Listeners.OnPlayerChat>((player, message, teamChat) =>
-            {
-                string m = message.Trim();
-                if (m.Length > 1 && (m[0] == '!' || m[0] == '/'))
-                    Logger.LogInformation("[SuperZeus] Chat event: '{Text}' from {Who}", m, player?.PlayerName ?? "?");
-            });
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
-            AddCommandListener("say", OnSuperZeusChat);
-            AddCommandListener("say_team", OnSuperZeusChat);
+            // One distinct delegate per command. CS# keys its listener table by
+            // the delegate, so registering the same method for "say" and
+            // "say_team" overwrote the first entry and left that hook alive
+            // after unload: a ghost copy of the plugin kept answering chat.
+            AddCommandListener("say", (player, info) => OnSuperZeusChat(player, info));
+            AddCommandListener("say_team", (player, info) => OnSuperZeusChat(player, info));
 
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
@@ -214,10 +211,6 @@ namespace ZeusOnlyMode
             var parts = info.GetArg(1).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0)
                 return HookResult.Continue;
-
-            // Diagnostic: every !/ chat message, as seen by the say hook
-            if (parts[0].Length > 1 && (parts[0][0] == '!' || parts[0][0] == '/'))
-                Logger.LogInformation("[SuperZeus] Say hook: '{Text}' from {Who}", info.GetArg(1).Trim(), player?.PlayerName ?? "?");
 
             string word = parts[0].TrimStart('!', '/');
 

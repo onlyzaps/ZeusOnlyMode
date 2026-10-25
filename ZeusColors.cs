@@ -90,8 +90,9 @@ namespace ZeusOnlyMode
                 OpenColorMenu(player);
             });
 
-            AddCommandListener("say", OnZeusColorChat);
-            AddCommandListener("say_team", OnZeusColorChat);
+            // Distinct delegates per command (see LoadSuperZeus for why)
+            AddCommandListener("say", (player, info) => OnZeusColorChat(player, info));
+            AddCommandListener("say_team", (player, info) => OnZeusColorChat(player, info));
 
             RegisterEventHandler<EventWeaponFire>(OnZapFired);
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
