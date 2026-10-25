@@ -173,7 +173,6 @@ namespace ZeusOnlyMode
 
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
-            RegisterListener<Listeners.OnEntitySpawned>(OnRagdollSpawned);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
@@ -802,57 +801,89 @@ namespace ZeusOnlyMode
             var chest = feet + new Vector3(0, 0, 40f);
             var shooterPawn = Utilities.GetPlayerFromSlot(ball.OwnerSlot)?.PlayerPawn.Value;
 
-            // Fling a body the hit is about to kill along the ball's path:
-            // velocity set BEFORE death is inherited by the ragdoll, and the
-            // ragdoll impulse stamped right after throws the client ragdoll
             var flat = new Vector3(ball.Velocity.X, ball.Velocity.Y, 0f);
             var dir = flat.LengthSquared() < 1f ? Vector3.UnitX : Vector3.Normalize(flat);
             var launch = dir * RagdollLaunchSpeed + new Vector3(0f, 0f, RagdollLaunchSpeed * 0.3f);
 
             int before = pawn.Health;
-            if (before <= BallDamage)
+            bool lethal = before <= BallDamage;
+
+            if (lethal)
             {
+                // A CS2 body keeps the motion the player really had when they
+                // died; pushes sent to the body after death are ignored (logs
+                // showed force and bone set, no movement, and no server ragdoll
+                // ever spawns). So throw the living player first and land the
+                // killing damage a moment later, mid-flight.
                 pawn.Teleport(null, null, (Vector3?)launch);
-
-                // Ask the server to build this body as a real physics ragdoll
-                // (a client-side ragdoll ignores pushes sent from the server),
-                // and catch it as it spawns so it can be thrown
-                try { RequestServerRagdoll(pawn); }
-                catch (Exception ex) { Logger.LogError("[SuperZeus] Server ragdoll request failed: {Message}", ex.Message); }
-                ArmRagdollCatch(victim.PlayerName, launch);
+                var pawnHandle = HandleOf(pawn);
+                string name = victim.PlayerName;
+                AddTimer(MidFlightKillDelay, () => FinishMidFlight(pawnHandle, name, ball, shooterPawn, launch, before),
+                    TimerFlags.STOP_ON_MAPCHANGE);
             }
-
-            // Damage comes first, so nothing cosmetic below can ever stop it.
-            // While it's applied, OnBallDamagePre puts the launch on the damage
-            // itself, which is what the game builds the ragdoll's throw from.
-            pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
-            ballForceApplied = false;
-            try { DamagePawn(pawn, shooterPawn, chest, before); }
-            finally { pendingBallForces.Remove(pawn.Index); }
-            bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
-            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
-                victim.PlayerName, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
-                ballForceApplied ? "applied" : "not applied");
-
-            if (killed)
+            else
             {
-                try { Logger.LogInformation("[SuperZeus] {Name} ragdoll: {Info}", victim.PlayerName, StampRagdollImpulse(pawn, launch)); }
-                catch (Exception ex) { Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message); }
+                ApplyBallDamage(pawn, victim.PlayerName, shooterPawn, launch, chest, before);
             }
 
             try
             {
-                if (killed)
-                    StartBodyZap(feet, launch, ball.Color, null, BodyZapLife);
+                // Lethal: crackle rides the flying player, then their body.
+                // Survivor: short crackle that stays on them.
+                if (lethal)
+                    StartBodyZap(feet, launch, ball.Color, HandleOf(pawn), BodyZapLife);
                 else
                     StartBodyZap(feet, Vector3.Zero, ball.Color, HandleOf(pawn), BodyZapHitLife);
 
                 ImpactBurst(chest);
-                pawn.EmitSound(killed ? "Player.DeathTaser" : "Weapon_Taser.Hit");
+                pawn.EmitSound(lethal ? "Player.DeathTaser" : "Weapon_Taser.Hit");
             }
             catch (Exception ex)
             {
                 Logger.LogError("[SuperZeus] Hit effects failed: {Message}", ex.Message);
+            }
+        }
+
+        // Time the thrown player flies before the killing damage lands, so the
+        // body has real momentum to keep (about seven server ticks)
+        private const float MidFlightKillDelay = 0.12f;
+
+        private void FinishMidFlight(CHandle<CCSPlayerPawn> pawnHandle, string name, LightningBall ball,
+            CCSPlayerPawn? shooterPawn, Vector3 launch, int before)
+        {
+            var pawn = pawnHandle.Value;
+            if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
+            {
+                Logger.LogInformation("[SuperZeus] {Name} was already dead or gone before the mid-flight kill", name);
+                return;
+            }
+
+            float speed = ToVec3(pawn.AbsVelocity).Length();
+            var chest = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, 40f);
+            if (shooterPawn != null && !shooterPawn.IsValid)
+                shooterPawn = null;
+
+            ApplyBallDamage(pawn, name, shooterPawn, launch, chest, Math.Min(before, pawn.Health));
+            Logger.LogInformation("[SuperZeus] {Name} was moving at {Speed:0} units/s when the killing damage landed", name, speed);
+        }
+
+        // 34 damage with the shooter's credit and the launch on the damage
+        private void ApplyBallDamage(CCSPlayerPawn pawn, string name, CCSPlayerPawn? shooterPawn, Vector3 launch, Vector3 chest, int before)
+        {
+            pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
+            ballForceApplied = false;
+            try { DamagePawn(pawn, shooterPawn, chest, before); }
+            finally { pendingBallForces.Remove(pawn.Index); }
+
+            bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
+            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
+                name, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
+                ballForceApplied ? "applied" : "not applied");
+
+            if (killed)
+            {
+                try { StampRagdollImpulse(pawn, launch); }
+                catch (Exception ex) { Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message); }
             }
         }
 
@@ -968,77 +999,6 @@ namespace ZeusOnlyMode
             Utilities.SetStateChanged(pawn, "CBaseEntity", "m_iHealth");
         }
 
-        // --- Server ragdoll launch -------------------------------------------
-        //
-        // Thrown bodies: a client-side ragdoll is simulated on each player's
-        // machine and ignored every push sent from the server (the kill logs
-        // showed the force and bone set, and the body still didn't move). With
-        // ForceServerRagdoll the server builds the ragdoll itself, as a physics
-        // entity the plugin can throw. It's caught as it spawns and given the
-        // launch velocity a frame later, once its physics exists.
-
-        private const float RagdollCatchWindow = 0.5f;
-
-        private sealed class RagdollCatch
-        {
-            public required string Victim;
-            public required Vector3 Launch;
-            public required float Until;
-            public bool Caught;
-        }
-
-        private RagdollCatch? pendingRagdoll;
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void RequestServerRagdoll(CCSPlayerPawn pawn)
-        {
-            pawn.ForceServerRagdoll = true;
-            pawn.ClientSideRagdoll = false;
-        }
-
-        private void ArmRagdollCatch(string victim, Vector3 launch)
-        {
-            var catcher = new RagdollCatch { Victim = victim, Launch = launch, Until = Server.CurrentTime + RagdollCatchWindow };
-            pendingRagdoll = catcher;
-
-            AddTimer(RagdollCatchWindow, () =>
-            {
-                if (!catcher.Caught)
-                    Logger.LogInformation("[SuperZeus] {Victim}: no server ragdoll spawned (only the client-side one)", catcher.Victim);
-                if (pendingRagdoll == catcher)
-                    pendingRagdoll = null;
-            }, TimerFlags.STOP_ON_MAPCHANGE);
-        }
-
-        private void OnRagdollSpawned(CEntityInstance entity)
-        {
-            var catcher = pendingRagdoll;
-            if (catcher == null || catcher.Caught || Server.CurrentTime > catcher.Until)
-                return;
-
-            string name;
-            try { name = entity.DesignerName ?? ""; }
-            catch { return; }
-
-            if (!name.Contains("ragdoll", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            catcher.Caught = true;
-            var handle = new CHandle<CBaseEntity>(entity.EntityHandle.Raw);
-            Server.NextFrame(() =>
-            {
-                var ragdoll = handle.Value;
-                if (ragdoll == null || !ragdoll.IsValid)
-                {
-                    Logger.LogInformation("[SuperZeus] {Victim}: server ragdoll '{Name}' vanished before launch", catcher.Victim, name);
-                    return;
-                }
-
-                ragdoll.Teleport(null, null, (Vector3?)catcher.Launch);
-                Logger.LogInformation("[SuperZeus] {Victim}: launched server ragdoll '{Name}'", catcher.Victim, name);
-            });
-        }
-
         // Kept in its own non-inlined method on purpose: schema fields come and
         // go between CS2 updates (m_vRagdollDamagePosition was removed), and a
         // missing member only fails the method that references it. Isolated
@@ -1049,7 +1009,7 @@ namespace ZeusOnlyMode
         // bone unset and the push goes nowhere (the gun flew, the body didn't).
         // If it's unset, point it at the pelvis (bone 0) so the push lands.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static string StampRagdollImpulse(CCSPlayerPawn pawn, Vector3 launch)
+        private static void StampRagdollImpulse(CCSPlayerPawn pawn, Vector3 launch)
         {
             int gameBone = pawn.RagdollDamageBone;
             if (gameBone < 0)
@@ -1063,7 +1023,6 @@ namespace ZeusOnlyMode
             pawn.RagdollDamageForce.Z = launch.Z * RagdollForceScale;
             Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
 
-            return $"game bone {gameBone}, using bone {pawn.RagdollDamageBone}";
         }
 
         // Forced suicide; if the pawn is somehow still alive, fall back to the
@@ -1365,10 +1324,13 @@ namespace ZeusOnlyMode
             zap.LastUpdate = now;
 
             var followed = zap.Follow?.Value;
-            if (followed != null && followed.IsValid && followed.AbsOrigin != null)
+            if (followed != null && followed.IsValid && followed.AbsOrigin != null
+                && followed.LifeState == (byte)LifeState_t.LIFE_ALIVE)
             {
-                // A survivor: stay on them as they move
+                // Alive (a survivor, or a thrown player not yet dead): stay on
+                // them, and keep their motion for when they die
                 zap.Center = ToVec3(followed.AbsOrigin) + new Vector3(0, 0, PlayerHullHeight * 0.5f);
+                zap.Velocity = ToVec3(followed.AbsVelocity);
             }
             else
             {
