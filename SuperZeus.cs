@@ -146,8 +146,16 @@ namespace ZeusOnlyMode
         {
             LoadSuperZeusState();
 
-            AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", (player, info) =>
-                ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null));
+            // Both spellings work from console/RCON. CS# also forwards "!superzeus"
+            // in chat to css_superzeus, so the chat hook below and this command
+            // can both fire for one chat line; the debounce in ToggleSuperZeus
+            // makes that a single toggle.
+            foreach (var name in new[] { "superzeus", "css_superzeus" })
+                AddCommand(name, "Toggle Super Zeus (alt-fire lightning balls)", (player, info) =>
+                {
+                    Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
+                    ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
+                });
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
             AddCommandListener("say", OnSuperZeusChat);
@@ -195,6 +203,13 @@ namespace ZeusOnlyMode
                 return HookResult.Continue;
 
             string word = parts[0].TrimStart('!', '/');
+
+            // Anything zeus-ish typed as a command is logged, so a toggle that
+            // "did nothing" can be traced from the console
+            if (parts[0].Length > 1 && (parts[0][0] == '!' || parts[0][0] == '/')
+                && word.Contains("zeus", StringComparison.OrdinalIgnoreCase))
+                Logger.LogInformation("[SuperZeus] Chat command '{Text}' from {Who}", info.GetArg(1).Trim(), player?.PlayerName ?? "?");
+
             if (!word.Equals("superzeus", StringComparison.OrdinalIgnoreCase))
                 return HookResult.Continue;
 
@@ -202,8 +217,15 @@ namespace ZeusOnlyMode
             return HookResult.Handled;
         }
 
+        // One chat line can reach the toggle twice (chat hook + CS#'s css_ dispatch)
+        private DateTime lastToggle = DateTime.MinValue;
+
         private void ToggleSuperZeus(CCSPlayerController? player, string? arg)
         {
+            if ((DateTime.UtcNow - lastToggle).TotalSeconds < 0.5)
+                return;
+            lastToggle = DateTime.UtcNow;
+
             if (player != null)
             {
                 // Every attempt is logged with the player's admin flags, so a

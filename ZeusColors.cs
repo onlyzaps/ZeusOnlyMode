@@ -79,7 +79,8 @@ namespace ZeusOnlyMode
 
             // Bare name (no css_ prefix) so CSS's own !/ chat dispatch never
             // fires it a second time on top of our chat handler
-            AddCommand("zeuscolor", "Show the Zeus color menu (or press Reload with the Zeus)", (player, info) =>
+            foreach (var name in new[] { "zeuscolor", "css_zeuscolor" })
+            AddCommand(name, "Show the Zeus color menu (or press Reload with the Zeus)", (player, info) =>
             {
                 if (player == null || !player.IsValid || player.IsBot)
                 {
