@@ -632,7 +632,10 @@ namespace ZeusOnlyMode
         {
             var projectile = ball.Projectile.Value;
             if (projectile == null || !projectile.IsValid || projectile.AbsOrigin == null)
+            {
+                LogBallEnd(ball, ball.LastPosition, "lost its carrier (deleted by something outside the plugin)");
                 return false;
+            }
 
             var pos = ToVec3(projectile.AbsOrigin);
 

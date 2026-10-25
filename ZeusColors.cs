@@ -2,7 +2,6 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Timers;
-using CounterStrikeSharp.API.Modules.UserMessages;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
@@ -99,27 +98,6 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventWeaponFire>(OnZapFired);
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
 
-            // Hide the stock zap from other players when the shooter has a
-            // color. Tried once before (builds 6-7) and the server crashed on
-            // join; that build was compiled against CS# 1.0.362 while the server
-            // ran a newer CS#, a mismatch that broke other calls silently, so
-            // this is a retest against 1.0.378. Everything in it is guarded.
-            try
-            {
-                int fireBulletsId = UserMessage.FindIdByName("CMsgTEFireBullets");
-                if (fireBulletsId > 0)
-                {
-                    HookUserMessage(fireBulletsId, OnFireBullets, HookMode.Pre);
-                    Logger.LogInformation("[ZeusColor] Hooked CMsgTEFireBullets ({Id}) to hide the stock zap for colored players", fireBulletsId);
-                }
-                else
-                    Logger.LogWarning("[ZeusColor] CMsgTEFireBullets not found; the stock zap can't be hidden");
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError("[ZeusColor] Could not hook CMsgTEFireBullets: {Message}", ex.Message);
-            }
-
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
             RegisterListener<Listeners.OnTick>(() =>
             {
@@ -188,63 +166,6 @@ namespace ZeusOnlyMode
             });
 
             return HookResult.Continue;
-        }
-
-        // Other players draw a shot's tracer, muzzle flash and sound from the
-        // server's FireBullets message. Withholding it for a colored zap leaves
-        // only the colored copy; the shot sound is replayed to the same players.
-        // The shooter's own game predicts its zap locally, which no server can
-        // stop, so the shooter still sees the stock zap themselves.
-        private const uint TaserItemDefIndex = 31;
-
-        private HookResult OnFireBullets(UserMessage message)
-        {
-            try
-            {
-                if (!message.HasField("item_def_index") || message.ReadUInt("item_def_index") != TaserItemDefIndex)
-                    return HookResult.Continue;
-
-                var shooter = message.HasField("player") ? FindPlayerByHandle(message.ReadUInt("player")) : null;
-                if (shooter == null || GetZeusColor(shooter) == null)
-                    return HookResult.Continue;
-
-                var pawn = shooter.PlayerPawn.Value;
-                if (pawn != null && pawn.IsValid)
-                {
-                    var listeners = new RecipientFilter();
-                    foreach (var p in message.Recipients)
-                        if (p != null && p.IsValid && p.Slot != shooter.Slot)
-                            listeners.Add(p);
-
-                    if (listeners.Count > 0)
-                        pawn.EmitSound("Weapon_Taser.Single", listeners);
-                }
-
-                return HookResult.Stop;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError("[ZeusColor] FireBullets hook failed: {Message}", ex.Message);
-                return HookResult.Continue;
-            }
-        }
-
-        // The message names the shooter by entity handle; accept either the
-        // pawn's or the controller's, by full handle or by entity index
-        private static CCSPlayerController? FindPlayerByHandle(uint handle)
-        {
-            uint index = handle & 0x7FFF;
-            foreach (var player in Utilities.GetPlayers())
-            {
-                if (player == null || !player.IsValid)
-                    continue;
-
-                var pawn = player.PlayerPawn.Value;
-                if (player.EntityHandle.Raw == handle || player.PlayerPawn.Raw == handle
-                    || player.Index == index || (pawn != null && pawn.Index == index))
-                    return player;
-            }
-            return null;
         }
 
         private HookResult OnZapImpact(EventBulletImpact ev, GameEventInfo info)
