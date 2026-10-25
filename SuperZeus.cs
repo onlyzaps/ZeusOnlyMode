@@ -21,7 +21,11 @@ namespace ZeusOnlyMode
     {
         private const string SuperZeusPermission = "@css/generic";
 
-        private const float BallSpeed = 2100f;
+        // The ball rides a grenade, and the engine deletes a grenade whose speed
+        // along any one world axis passes a limit (somewhere between 1800 and
+        // 2100; at 2100 balls fired north/south/east/west vanished on launch
+        // while diagonal ones flew). 1900 stays under it in every direction.
+        private const float BallSpeed = 1900f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
