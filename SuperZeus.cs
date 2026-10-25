@@ -169,6 +169,7 @@ namespace ZeusOnlyMode
 
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
+            RegisterListener<Listeners.OnEntitySpawned>(OnRagdollSpawned);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
@@ -786,7 +787,16 @@ namespace ZeusOnlyMode
 
             int before = pawn.Health;
             if (before <= BallDamage)
+            {
                 pawn.Teleport(null, null, (Vector3?)launch);
+
+                // Ask the server to build this body as a real physics ragdoll
+                // (a client-side ragdoll ignores pushes sent from the server),
+                // and catch it as it spawns so it can be thrown
+                try { RequestServerRagdoll(pawn); }
+                catch (Exception ex) { Logger.LogError("[SuperZeus] Server ragdoll request failed: {Message}", ex.Message); }
+                ArmRagdollCatch(victim.PlayerName, launch);
+            }
 
             // Damage comes first, so nothing cosmetic below can ever stop it.
             // While it's applied, OnBallDamagePre puts the launch on the damage
@@ -932,6 +942,77 @@ namespace ZeusOnlyMode
 
             pawn.Health = remaining;
             Utilities.SetStateChanged(pawn, "CBaseEntity", "m_iHealth");
+        }
+
+        // --- Server ragdoll launch -------------------------------------------
+        //
+        // Thrown bodies: a client-side ragdoll is simulated on each player's
+        // machine and ignored every push sent from the server (the kill logs
+        // showed the force and bone set, and the body still didn't move). With
+        // ForceServerRagdoll the server builds the ragdoll itself, as a physics
+        // entity the plugin can throw. It's caught as it spawns and given the
+        // launch velocity a frame later, once its physics exists.
+
+        private const float RagdollCatchWindow = 0.5f;
+
+        private sealed class RagdollCatch
+        {
+            public required string Victim;
+            public required Vector3 Launch;
+            public required float Until;
+            public bool Caught;
+        }
+
+        private RagdollCatch? pendingRagdoll;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void RequestServerRagdoll(CCSPlayerPawn pawn)
+        {
+            pawn.ForceServerRagdoll = true;
+            pawn.ClientSideRagdoll = false;
+        }
+
+        private void ArmRagdollCatch(string victim, Vector3 launch)
+        {
+            var catcher = new RagdollCatch { Victim = victim, Launch = launch, Until = Server.CurrentTime + RagdollCatchWindow };
+            pendingRagdoll = catcher;
+
+            AddTimer(RagdollCatchWindow, () =>
+            {
+                if (!catcher.Caught)
+                    Logger.LogInformation("[SuperZeus] {Victim}: no server ragdoll spawned (only the client-side one)", catcher.Victim);
+                if (pendingRagdoll == catcher)
+                    pendingRagdoll = null;
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        private void OnRagdollSpawned(CEntityInstance entity)
+        {
+            var catcher = pendingRagdoll;
+            if (catcher == null || catcher.Caught || Server.CurrentTime > catcher.Until)
+                return;
+
+            string name;
+            try { name = entity.DesignerName ?? ""; }
+            catch { return; }
+
+            if (!name.Contains("ragdoll", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            catcher.Caught = true;
+            var handle = new CHandle<CBaseEntity>(entity.EntityHandle.Raw);
+            Server.NextFrame(() =>
+            {
+                var ragdoll = handle.Value;
+                if (ragdoll == null || !ragdoll.IsValid)
+                {
+                    Logger.LogInformation("[SuperZeus] {Victim}: server ragdoll '{Name}' vanished before launch", catcher.Victim, name);
+                    return;
+                }
+
+                ragdoll.Teleport(null, null, (Vector3?)catcher.Launch);
+                Logger.LogInformation("[SuperZeus] {Victim}: launched server ragdoll '{Name}'", catcher.Victim, name);
+            });
         }
 
         // Kept in its own non-inlined method on purpose: schema fields come and
