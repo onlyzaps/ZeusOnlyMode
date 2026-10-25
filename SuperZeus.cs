@@ -114,10 +114,9 @@ namespace ZeusOnlyMode
             AddCommandListener("say", OnSuperZeusChat);
             AddCommandListener("say_team", OnSuperZeusChat);
 
-            RegisterListener<Listeners.OnTick>(PollButtons);
+            RegisterListener<Listeners.OnPlayerButtonsChanged>(OnButtonsChanged);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
-            RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
             {
                 foreach (var resource in SuperZeusResources)
@@ -130,7 +129,6 @@ namespace ZeusOnlyMode
                 bodyZaps.Clear();
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
-                lastButtons.Clear();
                 pendingRecharges.Clear();
                 taserRechargeCvar = null;
                 teammatesAreEnemiesCvar = null;
@@ -198,33 +196,22 @@ namespace ZeusOnlyMode
                 player.PrintToChat(message);
         }
 
-        // Button presses are read straight off each pawn every tick instead
-        // of through the OnPlayerButtonsChanged listener, so the alt-fire and
-        // the color menu each reliably see every press
-        private readonly Dictionary<int, PlayerButtons> lastButtons = new();
-
-        private void PollButtons()
+        // The single OnPlayerButtonsChanged listener for the whole plugin. The
+        // game raises it in each player's pre-think, where their inputs are
+        // processed. The alt-fire stopped working when the color menu once
+        // registered a second listener for the same event, so there is only
+        // this one: both features are fed from here, each guarded so neither
+        // can stop the other.
+        private void OnButtonsChanged(CCSPlayerController player, PlayerButtons pressed, PlayerButtons released)
         {
-            foreach (var player in Utilities.GetPlayers())
-            {
-                if (player == null || !player.IsValid || player.IsBot)
-                    continue;
+            if (pressed == 0 || player == null || !player.IsValid || player.IsBot)
+                return;
 
-                var movement = player.Pawn.Value?.MovementServices;
-                if (movement == null)
-                    continue;
+            try { OnSuperZeusButtons(player, pressed); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] Alt-fire failed for {Name}: {Error}", player.PlayerName, ex); }
 
-                var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
-                lastButtons.TryGetValue(player.Slot, out var previous);
-                lastButtons[player.Slot] = buttons;
-
-                var pressed = buttons & ~previous;
-                if (pressed == 0)
-                    continue;
-
-                OnSuperZeusButtons(player, pressed);
-                OnZeusColorButtons(player, pressed);
-            }
+            try { OnZeusColorButtons(player, pressed); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] Color menu input failed for {Name}: {Error}", player.PlayerName, ex); }
         }
 
         private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed)
