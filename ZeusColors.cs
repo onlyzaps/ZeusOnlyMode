@@ -120,16 +120,13 @@ namespace ZeusOnlyMode
                 Logger.LogError("[ZeusColor] Could not hook CMsgTEFireBullets: {Message}", ex.Message);
             }
 
-            // Test: tint each player's Zeus to their color (see TintZeuses)
-            AddTimer(0.5f, TintZeuses, TimerFlags.REPEAT);
-
             RegisterListener<Listeners.OnTick>(OnColorMenuTick);
             RegisterListener<Listeners.OnTick>(() =>
             {
                 if (colorZaps.Count > 0)
                     UpdateColorZaps();
             });
-            RegisterListener<Listeners.OnMapStart>(_ => { colorZaps.Clear(); zeusTints.Clear(); });
+            RegisterListener<Listeners.OnMapStart>(_ => colorZaps.Clear());
             RegisterListener<Listeners.OnClientDisconnect>(slot =>
             {
                 colorMenus.Remove(slot);
@@ -248,46 +245,6 @@ namespace ZeusOnlyMode
                     return player;
             }
             return null;
-        }
-
-        // Test: tint each player's Zeus model to their color (white on
-        // Default). Both Zeus materials take the full model tint, so this
-        // colors the whole gun, charge-meter screen included.
-        private readonly Dictionary<uint, Color> zeusTints = new();
-
-        private void TintZeuses()
-        {
-            foreach (var player in Utilities.GetPlayers())
-            {
-                try
-                {
-                    if (player == null || !player.IsValid || player.IsBot)
-                        continue;
-
-                    var weapons = player.PlayerPawn.Value?.WeaponServices?.MyWeapons;
-                    if (weapons == null)
-                        continue;
-
-                    var color = GetZeusColor(player)?.Color ?? Color.White;
-                    foreach (var handle in weapons)
-                    {
-                        var weapon = handle.Value;
-                        if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
-                            continue;
-
-                        if (zeusTints.TryGetValue(weapon.Index, out var current) && current.ToArgb() == color.ToArgb())
-                            continue;
-
-                        weapon.Render = Color.FromArgb(255, color.R, color.G, color.B);
-                        Utilities.SetStateChanged(weapon, "CBaseModelEntity", "m_clrRender");
-                        zeusTints[weapon.Index] = color;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError("[ZeusColor] Tinting {Name}'s Zeus failed: {Message}", player?.PlayerName ?? "?", ex.Message);
-                }
-            }
         }
 
         private HookResult OnZapImpact(EventBulletImpact ev, GameEventInfo info)
