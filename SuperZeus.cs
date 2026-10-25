@@ -1,5 +1,6 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
@@ -150,12 +151,15 @@ namespace ZeusOnlyMode
             // in chat to css_superzeus, so the chat hook below and this command
             // can both fire for one chat line; the debounce in ToggleSuperZeus
             // makes that a single toggle.
-            foreach (var name in new[] { "superzeus", "css_superzeus" })
-                AddCommand(name, "Toggle Super Zeus (alt-fire lightning balls)", (player, info) =>
-                {
-                    Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-                    ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
-                });
+            AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", ConCommand_SuperZeus);
+
+            // Diagnostic: every !/ chat message, as seen by the game's chat event
+            RegisterListener<Listeners.OnPlayerChat>((player, message, teamChat) =>
+            {
+                string m = message.Trim();
+                if (m.Length > 1 && (m[0] == '!' || m[0] == '/'))
+                    Logger.LogInformation("[SuperZeus] Chat event: '{Text}' from {Who}", m, player?.PlayerName ?? "?");
+            });
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
             AddCommandListener("say", OnSuperZeusChat);
@@ -196,19 +200,26 @@ namespace ZeusOnlyMode
             ClearLightningBalls();
         }
 
+        // css_superzeus: registered by attribute, exactly like other plugins'
+        // chat-triggered commands on this server (CS# forwards "!superzeus" here)
+        [ConsoleCommand("css_superzeus", "Toggle Super Zeus (alt-fire lightning balls)")]
+        public void ConCommand_SuperZeus(CCSPlayerController? player, CommandInfo info)
+        {
+            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
+            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
+        }
+
         private HookResult OnSuperZeusChat(CCSPlayerController? player, CommandInfo info)
         {
             var parts = info.GetArg(1).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0)
                 return HookResult.Continue;
 
-            string word = parts[0].TrimStart('!', '/');
+            // Diagnostic: every !/ chat message, as seen by the say hook
+            if (parts[0].Length > 1 && (parts[0][0] == '!' || parts[0][0] == '/'))
+                Logger.LogInformation("[SuperZeus] Say hook: '{Text}' from {Who}", info.GetArg(1).Trim(), player?.PlayerName ?? "?");
 
-            // Anything zeus-ish typed as a command is logged, so a toggle that
-            // "did nothing" can be traced from the console
-            if (parts[0].Length > 1 && (parts[0][0] == '!' || parts[0][0] == '/')
-                && word.Contains("zeus", StringComparison.OrdinalIgnoreCase))
-                Logger.LogInformation("[SuperZeus] Chat command '{Text}' from {Who}", info.GetArg(1).Trim(), player?.PlayerName ?? "?");
+            string word = parts[0].TrimStart('!', '/');
 
             if (!word.Equals("superzeus", StringComparison.OrdinalIgnoreCase))
                 return HookResult.Continue;
