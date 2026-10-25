@@ -27,7 +27,7 @@ namespace ZeusOnlyMode
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
         private const float BallLifetime = 2.5f;
-        private const float MinBallGap = 0.1f;   // keeps a full pool from firing on one tick
+        private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
         private const float PlayerHullRadius = 16f;  // half of the 32-unit player hull
         private const float PlayerHullHeight = 72f;
@@ -84,10 +84,17 @@ namespace ZeusOnlyMode
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
+        private readonly List<PendingRecharge> pendingRecharges = new();
         private ConVar? taserRechargeCvar;
 
         // CS2's stock mp_taser_recharge_time, used if the cvar can't be read
         private const float DefaultTaserRechargeSeconds = 30f;
+
+        private sealed class PendingRecharge
+        {
+            public required CHandle<CWeaponTaser> Zeus;
+            public required float ReadyAt;
+        }
 
         // One crackling arc: jagged points stored relative to the ball so the
         // arc travels with it, each segment drawn as a dim wide glow beam with
@@ -172,7 +179,6 @@ namespace ZeusOnlyMode
 
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
-            RegisterEventHandler<EventWeaponFire>(OnZeusZapForBalls);
             RegisterEventHandler<EventPlayerSpawn>(OnSpawnRestoreBody);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
@@ -185,7 +191,7 @@ namespace ZeusOnlyMode
             {
                 lightningBalls.Clear();
                 ballSparks.Clear();
-                ballEnergy.Clear();
+                pendingRecharges.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
                 bodyFades.Clear();
@@ -411,9 +417,9 @@ namespace ZeusOnlyMode
 
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
-                return; // within the 0.1s minimum gap between balls
+                return;
 
-            // A normal zap's charge still gates the ball
+            // Same energy as a normal zap: no charge, no ball
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
@@ -422,48 +428,30 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            float energy = BallEnergy(zeus.Index, now);
-            if (energy < 1f)
-            {
-                Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: ball energy {Energy:0.00}/{Max} (refilling)", player.PlayerName, energy, BallsPerCharge);
-                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
-                return;
-            }
-
-            ballEnergy[zeus.Index] = (energy - 1f, now);
-            nextBallTime[player.Slot] = now + MinBallGap;
-            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, BallsPerCharge);
+            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
+            nextBallTime[player.Slot] = now + BallCooldown;
+            ConsumeZeusCharge(zeus);
             FireLightningBall(player, pawn, zeus);
         }
 
-        // Balls fire three times as fast as the normal zap: each ball spends
-        // one point of a three-point pool that refills three points per
-        // mp_taser_recharge_time (the zap's own refire time). A normal zap
-        // empties the pool. Balls don't spend the zap's charge, which would
-        // cap them at the zap's rate.
-        private const int BallsPerCharge = 3;
-
-        // Ball energy per Zeus (weapon index): value and when it was last updated
-        private readonly Dictionary<uint, (float Value, float At)> ballEnergy = new();
-
-        private float BallEnergy(uint zeusIndex, float now)
+        // Spend the charge like a primary fire does. Setting the fire time
+        // drives the HUD's recharge meter, but the server-side refill a real
+        // shot schedules isn't reachable from here, so the meter would stall
+        // at 99% forever. We finish the recharge ourselves at the same moment
+        // the meter fills (mp_taser_recharge_time after the shot).
+        private void ConsumeZeusCharge(CWeaponTaser zeus)
         {
-            if (!ballEnergy.TryGetValue(zeusIndex, out var state))
-                return BallsPerCharge;
+            zeus.Clip1 -= 1;
+            zeus.FireTime = Server.CurrentTime;
+            zeus.LastAttackTick = Server.TickCount;
+            Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
+            Utilities.SetStateChanged(zeus, "CWeaponTaser", "m_fFireTime");
 
-            float perSecond = BallsPerCharge / Math.Max(TaserRechargeSeconds(), 0.05f);
-            return Math.Min(BallsPerCharge, state.Value + (now - state.At) * perSecond);
-        }
-
-        private HookResult OnZeusZapForBalls(EventWeaponFire ev, GameEventInfo info)
-        {
-            if (!ev.Weapon.Contains("taser"))
-                return HookResult.Continue;
-
-            var weapon = ev.Userid?.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
-            if (weapon != null && weapon.IsValid)
-                ballEnergy[weapon.Index] = (0f, Server.CurrentTime);
-            return HookResult.Continue;
+            pendingRecharges.Add(new PendingRecharge
+            {
+                Zeus = HandleOf(zeus),
+                ReadyAt = Server.CurrentTime + TaserRechargeSeconds()
+            });
         }
 
         private float TaserRechargeSeconds()
@@ -472,6 +460,35 @@ namespace ZeusOnlyMode
             return float.TryParse(taserRechargeCvar?.StringValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
                 ? Math.Max(seconds, 0f)
                 : DefaultTaserRechargeSeconds;
+        }
+
+        private void ProcessPendingRecharges()
+        {
+            float now = Server.CurrentTime;
+            for (int i = pendingRecharges.Count - 1; i >= 0; i--)
+            {
+                var pending = pendingRecharges[i];
+                var zeus = pending.Zeus.Value;
+
+                // Gone, or already refilled (by the game or a fresh zeus)
+                if (zeus == null || !zeus.IsValid || zeus.Clip1 > 0)
+                {
+                    pendingRecharges.RemoveAt(i);
+                    continue;
+                }
+
+                if (now < pending.ReadyAt)
+                    continue;
+
+                zeus.Clip1 = Math.Max(1, zeus.VData?.MaxClip1 ?? 1);
+                Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
+
+                var owner = zeus.OwnerEntity.Value;
+                if (owner != null && owner.IsValid)
+                    owner.EmitSound("Weapon_Taser.ChargeReady");
+
+                pendingRecharges.RemoveAt(i);
+            }
         }
 
         private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
@@ -609,6 +626,9 @@ namespace ZeusOnlyMode
 
         private void OnSuperZeusTick()
         {
+            if (pendingRecharges.Count > 0)
+                ProcessPendingRecharges();
+
             if (ballSparks.Count > 0)
                 UpdateBallSparks();
 
