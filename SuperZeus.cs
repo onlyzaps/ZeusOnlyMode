@@ -867,8 +867,13 @@ namespace ZeusOnlyMode
                 else
                     StartBodyZap(feet, Vector3.Zero, ball.Color, HandleOf(pawn), BodyZapHitLife);
 
-                ImpactBurst(chest);
-                pawn.EmitSound(lethal ? "Player.DeathTaser" : "Weapon_Taser.Hit");
+                // A kill's shock burst and death sound play where the body
+                // disintegrates (DisintegrationShow), not where the ball hit
+                if (!lethal)
+                {
+                    ImpactBurst(chest);
+                    pawn.EmitSound("Weapon_Taser.Hit");
+                }
             }
             catch (Exception ex)
             {
@@ -1084,6 +1089,7 @@ namespace ZeusOnlyMode
             SpawnFading(FxBurnSmoke, ground, BurnSmokeTime, BurnSmokeLinger);
 
             var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
+            flash?.EmitSound("Player.DeathTaser");
             flash?.EmitSound("Weapon_Taser.Hit");
             flash?.EmitSound("DoSpark");
             flash?.EmitSound("Breakable.Spark");
