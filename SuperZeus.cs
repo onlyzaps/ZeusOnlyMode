@@ -830,6 +830,12 @@ namespace ZeusOnlyMode
             else
             {
                 ApplyBallDamage(pawn, victim.PlayerName, shooterPawn, launch, chest, before);
+
+                if (pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE)
+                {
+                    try { KnockAndStun(pawn, dir); }
+                    catch (Exception ex) { Logger.LogError("[SuperZeus] Knockback/stun failed for {Name}: {Message}", victim.PlayerName, ex.Message); }
+                }
             }
 
             try
@@ -848,6 +854,23 @@ namespace ZeusOnlyMode
             {
                 Logger.LogError("[SuperZeus] Hit effects failed: {Message}", ex.Message);
             }
+        }
+
+        // A survivor gets a slight shove along the ball's path and the same
+        // "tagging" slowdown a gunshot gives: the pawn's networked velocity
+        // modifier drops, and the game recovers it by itself as it does after
+        // being shot.
+        private const float SurvivorKnockback = 250f;     // horizontal, units/s
+        private const float SurvivorKnockbackLift = 90f;  // upward, units/s
+        private const float SurvivorStunModifier = 0.35f; // speed multiplier right after the hit
+
+        private static void KnockAndStun(CCSPlayerPawn pawn, Vector3 direction)
+        {
+            var velocity = ToVec3(pawn.AbsVelocity) + direction * SurvivorKnockback + new Vector3(0f, 0f, SurvivorKnockbackLift);
+            pawn.Teleport(null, null, (Vector3?)velocity);
+
+            pawn.VelocityModifier = Math.Min(pawn.VelocityModifier, SurvivorStunModifier);
+            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_flVelocityModifier");
         }
 
         // Time the thrown player flies before the killing damage lands, so the
