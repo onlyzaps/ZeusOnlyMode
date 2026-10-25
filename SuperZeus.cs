@@ -9,6 +9,7 @@ using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
 using System.Globalization;
+using System.Text.Json;
 using System.Runtime.CompilerServices;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
@@ -105,8 +106,46 @@ namespace ZeusOnlyMode
             public int Age;
         }
 
+        // Super Zeus stays on across plugin reloads and map changes until an
+        // admin turns it off: the state lives next to the plugin config in
+        // configs/plugins/ZeusOnlyMode/superzeus_state.json
+        private string superZeusStatePath = "";
+
+        private void LoadSuperZeusState()
+        {
+            superZeusStatePath = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "ZeusOnlyMode", "superzeus_state.json"));
+            try
+            {
+                if (!File.Exists(superZeusStatePath))
+                    return;
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(superZeusStatePath));
+                superZeusEnabled = doc.RootElement.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean();
+                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}", superZeusEnabled ? "ON" : "OFF");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Could not read {Path}: {Message}", superZeusStatePath, ex.Message);
+            }
+        }
+
+        private void SaveSuperZeusState()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(superZeusStatePath)!);
+                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled }));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Could not save {Path}: {Message}", superZeusStatePath, ex.Message);
+            }
+        }
+
         private void LoadSuperZeus()
         {
+            LoadSuperZeusState();
+
             AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", (player, info) =>
                 ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null));
 
@@ -165,10 +204,21 @@ namespace ZeusOnlyMode
 
         private void ToggleSuperZeus(CCSPlayerController? player, string? arg)
         {
-            if (player != null && !AdminManager.PlayerHasPermissions(player, SuperZeusPermission))
+            if (player != null)
             {
-                player.PrintToChat("You do not have access to this command.");
-                return;
+                // Every attempt is logged with the player's admin flags, so a
+                // toggle that "did nothing" can be explained from the console
+                bool allowed = AdminManager.PlayerHasPermissions(player, SuperZeusPermission);
+                var data = AdminManager.GetPlayerAdminData(player);
+                string flags = data == null ? "no admin data" : string.Join(", ", data.Flags.SelectMany(kv => kv.Value));
+                Logger.LogInformation("[SuperZeus] Toggle attempt by {Name} ({SteamId}), arg '{Arg}': {Result}; flags: {Flags}",
+                    player.PlayerName, player.SteamID, arg ?? "", allowed ? "allowed" : "DENIED", flags);
+
+                if (!allowed)
+                {
+                    player.PrintToChat($" {ChatColors.Red}Super Zeus:{ChatColors.Default} you need the {SuperZeusPermission} admin flag to toggle it.");
+                    return;
+                }
             }
 
             bool newState = arg switch
@@ -185,6 +235,7 @@ namespace ZeusOnlyMode
             }
 
             superZeusEnabled = newState;
+            SaveSuperZeusState();
             Logger.LogInformation("[SuperZeus] Super Zeus turned {State} by {Who}", newState ? "ON" : "OFF", player?.PlayerName ?? "console");
 
             if (superZeusEnabled)
