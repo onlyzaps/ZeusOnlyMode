@@ -131,7 +131,6 @@ namespace ZeusOnlyMode
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
-                loggedOnce.Clear();
                 pendingRecharges.Clear();
                 taserRechargeCvar = null;
                 teammatesAreEnemiesCvar = null;
@@ -208,57 +207,29 @@ namespace ZeusOnlyMode
         {
             foreach (var player in Utilities.GetPlayers())
             {
-                if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+                if (player == null || !player.IsValid || player.IsBot)
                     continue;
 
-                // Each player is isolated: one player in an odd state
-                // (spectating, connecting, ...) must never stop the loop and
-                // take right-click away from everyone after them
-                try
-                {
-                    var movement = player.Pawn.Value?.MovementServices;
-                    if (movement == null)
-                        continue;
+                var movement = player.Pawn.Value?.MovementServices;
+                if (movement == null)
+                    continue;
 
-                    // ButtonStates: [0] held now, [1] toggled an odd number of
-                    // times this tick, [2] toggled two or more times this tick.
-                    // A quick tap the server processed within one tick (common
-                    // on a busy server, where several of a player's inputs can
-                    // land in the same tick) only shows up in [2].
-                    var states = movement.Buttons.ButtonStates;
-                    var held = (PlayerButtons)states[0];
-                    var tapped = (PlayerButtons)states[2];
+                var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
+                lastButtons.TryGetValue(player.Slot, out var previous);
+                lastButtons[player.Slot] = buttons;
 
-                    lastButtons.TryGetValue(player.Slot, out var previous);
-                    lastButtons[player.Slot] = held;
+                var pressed = buttons & ~previous;
+                if (pressed == 0)
+                    continue;
 
-                    var pressed = (held & ~previous) | tapped;
-                    if (pressed == 0)
-                        continue;
-
-                    OnSuperZeusButtons(player, pressed);
-                    OnZeusColorButtons(player, pressed);
-                }
-                catch (Exception ex)
-                {
-                    LogOnce($"poll:{ex.GetType().Name}:{ex.Message}",
-                        $"[SuperZeus] Reading buttons for {player.PlayerName} failed: {ex}");
-                }
+                OnSuperZeusButtons(player, pressed);
+                OnZeusColorButtons(player, pressed);
             }
-        }
-
-        // Errors that could repeat every tick are logged once per map
-        private readonly HashSet<string> loggedOnce = new();
-
-        private void LogOnce(string key, string message)
-        {
-            if (loggedOnce.Add(key))
-                Logger.LogError("{Message}", message);
         }
 
         private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed)
         {
-            if ((pressed & PlayerButtons.Attack2) == 0)
+            if (!superZeusEnabled || (pressed & PlayerButtons.Attack2) == 0)
                 return;
 
             if (player == null || !player.IsValid || !player.PawnIsAlive)
@@ -272,14 +243,6 @@ namespace ZeusOnlyMode
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
                 return;
 
-            // From here on every right-click with the Zeus is logged with its
-            // outcome, so a missing ball can be explained from the console
-            if (!superZeusEnabled)
-            {
-                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus is off", player.PlayerName);
-                return;
-            }
-
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
                 return;
@@ -288,12 +251,10 @@ namespace ZeusOnlyMode
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
-                Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
                 pawn.EmitSound("Weapon_Taser.ChargeNotReady");
                 return;
             }
 
-            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
             ConsumeZeusCharge(zeus);
             FireLightningBall(player, pawn, zeus);
