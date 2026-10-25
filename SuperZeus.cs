@@ -173,6 +173,8 @@ namespace ZeusOnlyMode
 
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
+            RegisterEventHandler<EventWeaponFire>(OnZeusZapForBalls);
+            RegisterEventHandler<EventRagdollDissolved>(OnRagdollDissolved);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
@@ -184,7 +186,10 @@ namespace ZeusOnlyMode
             {
                 lightningBalls.Clear();
                 ballSparks.Clear();
+                ballsLeftInCharge.Clear();
                 bodyZaps.Clear();
+                bodyZapsByPawn.Clear();
+                shockRings.Clear();
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
@@ -396,7 +401,8 @@ namespace ZeusOnlyMode
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
                 return;
 
-            // Same energy as a normal zap: no charge, no ball
+            // One Zeus charge is good for BallsPerCharge balls; the last one
+            // drains it and starts the normal recharge
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
@@ -405,10 +411,36 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
-            ConsumeZeusCharge(zeus);
+            int left = (ballsLeftInCharge.TryGetValue(zeus.Index, out var remaining) ? remaining : BallsPerCharge) - 1;
+            if (left <= 0)
+            {
+                ballsLeftInCharge.Remove(zeus.Index);
+                ConsumeZeusCharge(zeus);
+            }
+            else
+            {
+                ballsLeftInCharge[zeus.Index] = left;
+            }
+            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball ({Left} left in this charge)", player.PlayerName, Math.Max(left, 0));
             FireLightningBall(player, pawn, zeus);
+        }
+
+        private const int BallsPerCharge = 3;
+
+        // Balls still available in each Zeus's current charge, by weapon index
+        // (missing = a fresh charge). A normal zap spends the whole charge.
+        private readonly Dictionary<uint, int> ballsLeftInCharge = new();
+
+        private HookResult OnZeusZapForBalls(EventWeaponFire ev, GameEventInfo info)
+        {
+            if (!ev.Weapon.Contains("taser"))
+                return HookResult.Continue;
+
+            var weapon = ev.Userid?.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
+            if (weapon != null && weapon.IsValid)
+                ballsLeftInCharge.Remove(weapon.Index);
+            return HookResult.Continue;
         }
 
         // Spend the charge like a primary fire does. Setting the fire time
@@ -611,6 +643,9 @@ namespace ZeusOnlyMode
 
             if (bodyZaps.Count > 0)
                 UpdateBodyZaps();
+
+            if (shockRings.Count > 0)
+                UpdateShockRings();
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
@@ -831,7 +866,7 @@ namespace ZeusOnlyMode
                 // Lethal: crackle rides the flying player, then their body.
                 // Survivor: short crackle that stays on them.
                 if (lethal)
-                    StartBodyZap(feet, launch, ball.Color, HandleOf(pawn), BodyZapLife);
+                    bodyZapsByPawn[pawn.Index] = StartBodyZap(feet, launch, ball.Color, HandleOf(pawn), BodyZapLife);
                 else
                     StartBodyZap(feet, Vector3.Zero, ball.Color, HandleOf(pawn), BodyZapHitLife);
 
@@ -865,6 +900,189 @@ namespace ZeusOnlyMode
 
             ApplyBallDamage(pawn, name, shooterPawn, launch, chest, Math.Min(before, pawn.Health));
             Logger.LogInformation("[SuperZeus] {Name} was moving at {Speed:0} units/s when the killing damage landed", name, speed);
+
+            if (pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
+                AddTimer(DisintegrateDelay, () => DisintegrateBody(pawnHandle, name, ball.Color), TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        // --- Disintegration ---------------------------------------------------
+        //
+        // The engine still has Source's dissolve effect (CEntityDissolve, an
+        // electrical dissolve type, and a ragdoll_dissolved event). The body is
+        // drawn by each client from the dead player's pawn, so the dissolve is
+        // aimed at the pawn, both ways the engine offers: the pawn's own
+        // dissolve start time, and an env_entity_dissolver targeting it. Each
+        // step is logged, and ragdoll_dissolved is logged if the game reports it.
+
+        private const float DisintegrateDelay = 0.6f;   // let the body fly first
+
+        private void DisintegrateBody(CHandle<CCSPlayerPawn> pawnHandle, string name, ZeusColorOption? color)
+        {
+            var pawn = pawnHandle.Value;
+            if (pawn == null || !pawn.IsValid)
+            {
+                Logger.LogInformation("[SuperZeus] {Name}: body gone before it could disintegrate", name);
+                return;
+            }
+
+            try { DisintegrationShow(pawn, color); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] {Name}: disintegration effects failed: {Message}", name, ex.Message); }
+
+            try
+            {
+                pawn.DissolveStartTime = Server.CurrentTime;
+                Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_flDissolveStartTime");
+                Logger.LogInformation("[SuperZeus] {Name}: set dissolve start time", name);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] {Name}: dissolve start time failed: {Message}", name, ex.Message);
+            }
+
+            try
+            {
+                var dissolver = Utilities.CreateEntityByName<CEntityDissolve>("env_entity_dissolver");
+                var identity = pawn.Entity;
+                if (dissolver == null || identity == null)
+                {
+                    Logger.LogInformation("[SuperZeus] {Name}: could not create env_entity_dissolver", name);
+                    return;
+                }
+
+                string targetName = $"zeusball_dissolve_{pawn.Index}";
+                identity.Name = targetName;
+
+                dissolver.DissolveType = EntityDissolveType_t.ENTITY_DISSOLVE_ELECTRICAL;
+                dissolver.Magnitude = 250;
+                if (pawn.AbsOrigin != null)
+                    dissolver.Teleport(ToVec3(pawn.AbsOrigin), Vector3.Zero, Vector3.Zero);
+                dissolver.DispatchSpawn();
+                dissolver.AcceptInput("Dissolve", pawn, dissolver, targetName);
+                Logger.LogInformation("[SuperZeus] {Name}: fired env_entity_dissolver at the body", name);
+
+                RemoveLater(HandleOf(dissolver), 3f);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] {Name}: env_entity_dissolver failed: {Message}", name, ex.Message);
+            }
+        }
+
+        // The show around the dissolve, centered on where the body should be:
+        // a heavy crackle, an expanding shockwave ring, a burst of embers, the
+        // stock impact burst and a layered crackle of sound
+        private void DisintegrationShow(CCSPlayerPawn pawn, ZeusColorOption? color)
+        {
+            Vector3 center;
+            Vector3 drift = Vector3.Zero;
+            if (bodyZapsByPawn.Remove(pawn.Index, out var tracker))
+            {
+                center = tracker.Center;
+                drift = tracker.Velocity;
+            }
+            else
+            {
+                center = (pawn.AbsOrigin != null ? ToVec3(pawn.AbsOrigin) : Vector3.Zero) + new Vector3(0, 0, PlayerHullHeight * 0.5f);
+            }
+
+            var glow = BoltGlowColor(color);
+            var feet = center - new Vector3(0, 0, PlayerHullHeight * 0.5f);
+
+            StartBodyZap(feet, drift, color, null, DisintegrateCrackleLife, DisintegrateCrackleArcs);
+            shockRings.Add(new ShockRing(this, center, glow));
+            EmitBurstSparks(center, glow, 40, 180f, 520f);
+            ImpactBurst(center);
+
+            var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
+            flash?.EmitSound("Weapon_Taser.Hit");
+            flash?.EmitSound("DoSpark");
+            flash?.EmitSound("Breakable.Spark");
+        }
+
+        private const float DisintegrateCrackleLife = 1.6f;
+        private const int DisintegrateCrackleArcs = 12;
+
+        // An expanding, fading ring of light
+        private const int ShockRingSegments = 24;
+        private const float ShockRingLife = 0.4f;
+        private const float ShockRingStartRadius = 12f;
+        private const float ShockRingEndRadius = 140f;
+
+        private readonly List<ShockRing> shockRings = new();
+
+        private sealed class ShockRing
+        {
+            private readonly List<CHandle<CBeam>> beams = new();
+            private readonly Vector3 center;
+            private readonly Color color;
+            private readonly float born;
+
+            public ShockRing(ZeusOnlyPlugin plugin, Vector3 center, Color color)
+            {
+                this.center = center;
+                this.color = color;
+                born = Server.CurrentTime;
+                for (int i = 0; i < ShockRingSegments; i++)
+                {
+                    var beam = CreateBeam(center, center, color, 3f, 3f);
+                    if (beam != null) beams.Add(HandleOf(beam));
+                }
+                Update();
+            }
+
+            // Returns false once the ring has faded
+            public bool Update()
+            {
+                float t = (Server.CurrentTime - born) / ShockRingLife;
+                if (t >= 1f)
+                {
+                    Destroy();
+                    return false;
+                }
+
+                float radius = ShockRingStartRadius + (ShockRingEndRadius - ShockRingStartRadius) * MathF.Sqrt(t);
+                float width = 3f * (1f - t) + 0.4f;
+                var tint = Scale(Whiten(color, 0.3f * (1f - t)), 1f - t);
+
+                for (int i = 0; i < beams.Count; i++)
+                {
+                    var beam = beams[i].Value;
+                    if (beam == null || !beam.IsValid) continue;
+
+                    float a0 = i / (float)ShockRingSegments * MathF.PI * 2f;
+                    float a1 = (i + 1) / (float)ShockRingSegments * MathF.PI * 2f;
+                    var p0 = center + new Vector3(MathF.Cos(a0) * radius, MathF.Sin(a0) * radius, 0f);
+                    var p1 = center + new Vector3(MathF.Cos(a1) * radius, MathF.Sin(a1) * radius, 0f);
+
+                    beam.Teleport(p0, Vector3.Zero, Vector3.Zero);
+                    SetBeamEnd(beam, p1, true);
+                    beam.Width = width;
+                    beam.EndWidth = width;
+                    beam.Render = tint;
+                    Utilities.SetStateChanged(beam, "CBeam", "m_fWidth");
+                    Utilities.SetStateChanged(beam, "CBeam", "m_fEndWidth");
+                    Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
+                }
+                return true;
+            }
+
+            public void Destroy()
+            {
+                foreach (var beam in beams) RemoveEntity(beam);
+            }
+        }
+
+        private void UpdateShockRings()
+        {
+            for (int i = shockRings.Count - 1; i >= 0; i--)
+                if (!shockRings[i].Update())
+                    shockRings.RemoveAt(i);
+        }
+
+        private HookResult OnRagdollDissolved(EventRagdollDissolved ev, GameEventInfo info)
+        {
+            Logger.LogInformation("[SuperZeus] Game reported a ragdoll dissolved (entity {Index})", ev.Entindex);
+            return HookResult.Continue;
         }
 
         // 34 damage with the shooter's credit and the launch on the damage
@@ -1157,7 +1375,7 @@ namespace ZeusOnlyMode
         // color before fading out. Each is a short tapered beam stretched
         // along its velocity (motion blur), so it reads as a smooth streak.
 
-        private const int MaxBallSparks = 90;
+        private const int MaxBallSparks = 160;
         private const float SparkGravity = 800f;
         private const float SparkDrag = 2.5f;
 
@@ -1193,6 +1411,30 @@ namespace ZeusOnlyMode
                     Color = color,
                     Born = now,
                     Life = 0.25f + rng.NextSingle() * 0.3f,
+                    Pos = start,
+                    Vel = vel,
+                    LastUpdate = now
+                });
+            }
+        }
+
+        // A burst of white-hot sparks flung out in every direction
+        private void EmitBurstSparks(Vector3 center, Color color, int count, float minSpeed, float maxSpeed)
+        {
+            float now = Server.CurrentTime;
+            for (int i = 0; i < count && ballSparks.Count < MaxBallSparks; i++)
+            {
+                var start = center + RandomUnit() * 6f;
+                var vel = RandomUnit() * (minSpeed + rng.NextSingle() * (maxSpeed - minSpeed)) + new Vector3(0f, 0f, 120f);
+                var beam = CreateBeam(start, start - vel * 0.03f, Whiten(color, 0.8f), 0.8f, 0.2f);
+                if (beam == null) return;
+
+                ballSparks.Add(new BallSpark
+                {
+                    Beam = HandleOf(beam),
+                    Color = color,
+                    Born = now,
+                    Life = 0.5f + rng.NextSingle() * 0.6f,
                     Pos = start,
                     Vel = vel,
                     LastUpdate = now
@@ -1263,6 +1505,7 @@ namespace ZeusOnlyMode
             public required float FloorZ;
             public required float Born;
             public required float Life;
+            public required int Arcs;
             public CHandle<CCSPlayerPawn>? Follow;     // a living victim to stay on
             public Vector3 Center;
             public Vector3 Velocity;
@@ -1273,7 +1516,11 @@ namespace ZeusOnlyMode
 
         private readonly List<BodyZap> bodyZaps = new();
 
-        private void StartBodyZap(Vector3 feet, Vector3 launch, ZeusColorOption? color, CHandle<CCSPlayerPawn>? follow, float life)
+        // The crackle tracking each thrown victim; its center is the best
+        // estimate of where their client-side body is
+        private readonly Dictionary<uint, BodyZap> bodyZapsByPawn = new();
+
+        private BodyZap StartBodyZap(Vector3 feet, Vector3 launch, ZeusColorOption? color, CHandle<CCSPlayerPawn>? follow, float life, int arcs = BodyZapArcs)
         {
             float now = Server.CurrentTime;
             var zap = new BodyZap
@@ -1282,13 +1529,14 @@ namespace ZeusOnlyMode
                 FloorZ = feet.Z + PlayerHullRadius,
                 Born = now,
                 Life = life,
+                Arcs = arcs,
                 Follow = follow,
                 Center = feet + new Vector3(0, 0, PlayerHullHeight * 0.5f),
                 Velocity = launch,
                 LastUpdate = now
             };
 
-            for (int i = 0; i < BodyZapArcs * BodyZapSegments; i++)
+            for (int i = 0; i < arcs * BodyZapSegments; i++)
             {
                 var glow = CreateBeam(zap.Center, zap.Center, Scale(BoltGlowColor(color), 0.45f), 1.0f, 0.4f);
                 if (glow != null) zap.Glow.Add(HandleOf(glow));
@@ -1298,6 +1546,7 @@ namespace ZeusOnlyMode
 
             bodyZaps.Add(zap);
             UpdateBodyZap(zap);
+            return zap;
         }
 
         private void UpdateBodyZaps()
@@ -1351,7 +1600,7 @@ namespace ZeusOnlyMode
             var lineColor = Scale(Whiten(BoltGlowColor(zap.Color), 0.4f), fade);
 
             int beam = 0;
-            for (int arc = 0; arc < BodyZapArcs; arc++)
+            for (int arc = 0; arc < zap.Arcs; arc++)
             {
                 var points = BodyArcPoints(zap.Center);
                 for (int s = 0; s < BodyZapSegments; s++, beam++)
@@ -1473,6 +1722,9 @@ namespace ZeusOnlyMode
             lightningBalls.Clear();
             ClearBallSparks();
             ClearBodyZaps();
+            bodyZapsByPawn.Clear();
+            foreach (var ring in shockRings) ring.Destroy();
+            shockRings.Clear();
         }
 
         // Handles survive round restarts safely, unlike raw entity references held across ticks
