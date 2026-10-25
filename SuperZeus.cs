@@ -21,10 +21,7 @@ namespace ZeusOnlyMode
     {
         private const string SuperZeusPermission = "@css/generic";
 
-        private const float BallSpeed = 1800f;
-
-        // A Zeus drained by a ball recharges this many times faster than a zap
-        private const float BallRechargeSpeedup = 3f;
+        private const float BallSpeed = 2100f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
@@ -418,15 +415,8 @@ namespace ZeusOnlyMode
         // the meter fills (mp_taser_recharge_time after the shot).
         private void ConsumeZeusCharge(CWeaponTaser zeus)
         {
-            // A ball recharges in a third of the normal time. The charge meter
-            // always fills at the game's own rate, so the shot is back-dated:
-            // the meter starts partway and reaches 100% exactly when the
-            // charge comes back, instead of stalling short of it.
-            float recharge = TaserRechargeSeconds();
-            float wait = recharge / BallRechargeSpeedup;
-
             zeus.Clip1 -= 1;
-            zeus.FireTime = Server.CurrentTime - (recharge - wait);
+            zeus.FireTime = Server.CurrentTime;
             zeus.LastAttackTick = Server.TickCount;
             Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
             Utilities.SetStateChanged(zeus, "CWeaponTaser", "m_fFireTime");
@@ -434,7 +424,7 @@ namespace ZeusOnlyMode
             pendingRecharges.Add(new PendingRecharge
             {
                 Zeus = HandleOf(zeus),
-                ReadyAt = Server.CurrentTime + wait
+                ReadyAt = Server.CurrentTime + TaserRechargeSeconds()
             });
         }
 
