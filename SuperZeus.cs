@@ -35,7 +35,7 @@ namespace ZeusOnlyMode
 
         // How hard a lightning ball kill flings the enemy's ragdoll
         // (horizontal speed along the ball's path, plus 30% of it upward)
-        private const float RagdollLaunchSpeed = 2400f;
+        private const float RagdollLaunchSpeed = 800f;
 
         // Launch impulses are this many times the launch velocity: the body gets
         // the full push, the dropped gun half of it
