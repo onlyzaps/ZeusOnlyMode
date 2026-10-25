@@ -28,7 +28,6 @@ namespace ZeusOnlyMode
         private const float PlayerHullRadius = 16f;  // half of the 32-unit player hull
         private const float PlayerHullHeight = 72f;
         private const float BallTickLookahead = 1f / 64f; // one server tick of travel
-        private const float ShooterClearance = 64f;       // collisions this close to the spawn point are the shooter
 
         // How hard a lightning ball kill flings the enemy's ragdoll
         // (horizontal speed along the ball's path, plus 30% of it upward)
@@ -109,7 +108,6 @@ namespace ZeusOnlyMode
             public required ZeusColorOption? Color; // null = stock electric blue
             public required Vector3 Velocity;
             public required Vector3 LastPosition;
-            public required Vector3 SpawnPosition;
             public required float ExpireTime;
             public int Age;
         }
@@ -473,7 +471,7 @@ namespace ZeusOnlyMode
             var angles = new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0);
             AngleVectors(angles, out var forward, out var right, out var up);
 
-            var spawnPos = eye + forward * 32f;
+            var spawnPos = eye + forward * 24f;
             var muzzle = eye + forward * 28f + right * (pawn.LeftHanded ? -7f : 7f) - up * 7f;
             var velocity = forward * BallSpeed;
 
@@ -491,9 +489,11 @@ namespace ZeusOnlyMode
             projectile.OwnerEntity.Raw = pawn.EntityHandle.Raw;
             projectile.RenderMode = RenderMode_t.kRenderNone;
             SetDebrisCollision(projectile);
+            IgnoreOwnerCollision(projectile, pawn);
             projectile.DispatchSpawn();
             projectile.SetModel(BallCarrierModel); // guarantees a physics hull for wall collision
             SetDebrisCollision(projectile);
+            IgnoreOwnerCollision(projectile, pawn);
             projectile.GravityScale = 0.001f;
             projectile.Teleport(spawnPos, angles, velocity);
 
@@ -505,7 +505,6 @@ namespace ZeusOnlyMode
                 Color = GetZeusColor(player),
                 Velocity = velocity,
                 LastPosition = spawnPos,
-                SpawnPosition = spawnPos,
                 ExpireTime = Server.CurrentTime + BallLifetime
             };
 
@@ -568,6 +567,21 @@ namespace ZeusOnlyMode
             collision.CollisionGroup = (byte)CollisionGroup.COLLISION_GROUP_DEBRIS;
             collision.CollisionAttribute.CollisionGroup = (byte)CollisionGroup.COLLISION_GROUP_DEBRIS;
             Utilities.SetStateChanged(entity, "CCollisionProperty", "m_CollisionGroup");
+            Utilities.SetStateChanged(entity, "CCollisionProperty", "m_collisionAttribute");
+        }
+
+        // The physics engine skips collisions between an object and the entity
+        // its collision OwnerId names. Pointing the carrier's OwnerId at the
+        // shooter's pawn makes the ball pass straight through the shooter,
+        // with every other collision unchanged.
+        private static void IgnoreOwnerCollision(CBaseEntity entity, CBaseEntity owner)
+        {
+            var collision = entity.Collision;
+            var ownerCollision = owner.Collision;
+            if (collision == null || ownerCollision == null)
+                return;
+
+            collision.CollisionAttribute.OwnerId = ownerCollision.CollisionAttribute.EntityId;
             Utilities.SetStateChanged(entity, "CCollisionProperty", "m_collisionAttribute");
         }
 
@@ -636,18 +650,6 @@ namespace ZeusOnlyMode
                     WallBurst(pos); // teammates are never hurt; the ball just dissipates
                 }
                 return false;
-            }
-
-            // Ignore the shooter: while the ball is still clearing them, a
-            // collision is their own body, not a wall. Clear it and put the
-            // ball back on its straight path instead of bursting it in their face.
-            if (projectile.Bounces > 0 && Vector3.Distance(ball.SpawnPosition, ball.LastPosition) < ShooterClearance)
-            {
-                projectile.Bounces = 0;
-                var resume = ball.LastPosition + ball.Velocity * BallTickLookahead;
-                projectile.Teleport(resume, DirectionToAngles(ball.Velocity), ball.Velocity);
-                ball.LastPosition = resume;
-                return true;
             }
 
             if (projectile.Bounces > 0)
