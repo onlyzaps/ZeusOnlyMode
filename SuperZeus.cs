@@ -131,6 +131,8 @@ namespace ZeusOnlyMode
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
+                loggedOnce.Clear();
+                nextHeartbeat = 0f;
                 pendingRecharges.Clear();
                 taserRechargeCvar = null;
                 teammatesAreEnemiesCvar = null;
@@ -183,6 +185,7 @@ namespace ZeusOnlyMode
             }
 
             superZeusEnabled = newState;
+            Logger.LogInformation("[SuperZeus] Super Zeus turned {State} by {Who}", newState ? "ON" : "OFF", player?.PlayerName ?? "console");
 
             if (superZeusEnabled)
                 Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED{ChatColors.Default} - Right-Click With Your Zeus To Hurl A Lightning Ball!");
@@ -205,31 +208,84 @@ namespace ZeusOnlyMode
 
         private void PollButtons()
         {
-            foreach (var player in Utilities.GetPlayers())
+            List<CCSPlayerController> players;
+            try { players = Utilities.GetPlayers(); }
+            catch (Exception ex)
             {
-                if (player == null || !player.IsValid || player.IsBot)
-                    continue;
-
-                var movement = player.Pawn.Value?.MovementServices;
-                if (movement == null)
-                    continue;
-
-                var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
-                lastButtons.TryGetValue(player.Slot, out var previous);
-                lastButtons[player.Slot] = buttons;
-
-                var pressed = buttons & ~previous;
-                if (pressed == 0)
-                    continue;
-
-                OnSuperZeusButtons(player, pressed);
-                OnZeusColorButtons(player, pressed);
+                LogOnce($"players:{ex.GetType().Name}", $"[SuperZeus] Could not list players: {ex}");
+                return;
             }
+
+            int polled = 0;
+            foreach (var player in players)
+            {
+                // Each player is handled inside its own try/catch. An error on
+                // one player (connecting, spectating, mid team-switch) used to
+                // abort the whole loop and silently take right-click away from
+                // every player after them.
+                try
+                {
+                    if (player == null || !player.IsValid || player.IsBot || !player.PawnIsAlive)
+                        continue;
+
+                    // The player pawn specifically, never an observer pawn
+                    var movement = player.PlayerPawn.Value?.MovementServices;
+                    if (movement == null)
+                        continue;
+
+                    polled++;
+                    var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
+                    lastButtons.TryGetValue(player.Slot, out var previous);
+                    lastButtons[player.Slot] = buttons;
+
+                    var pressed = buttons & ~previous;
+                    if (pressed == 0)
+                        continue;
+
+                    if ((pressed & PlayerButtons.Attack2) != 0)
+                        rightClicksSeen++;
+
+                    OnSuperZeusButtons(player, pressed);
+                    OnZeusColorButtons(player, pressed);
+                }
+                catch (Exception ex)
+                {
+                    LogOnce($"poll:{ex.GetType().Name}:{ex.Message}",
+                        $"[SuperZeus] Reading buttons for {SafeName(player)} failed: {ex}");
+                }
+            }
+
+            // Heartbeat while Super Zeus is on: proves the poll is running and
+            // shows whether right-clicks are reaching it at all
+            if (superZeusEnabled && Server.CurrentTime >= nextHeartbeat)
+            {
+                nextHeartbeat = Server.CurrentTime + 15f;
+                Logger.LogInformation("[SuperZeus] Poll alive: {Polled} living players polled, {Clicks} right-clicks seen so far, {Balls} balls in flight",
+                    polled, rightClicksSeen, lightningBalls.Count);
+            }
+        }
+
+        private int rightClicksSeen;
+        private float nextHeartbeat;
+
+        private static string SafeName(CCSPlayerController? player)
+        {
+            try { return player?.PlayerName ?? "?"; }
+            catch { return "?"; }
+        }
+
+        // Errors that could repeat every tick are logged once per map
+        private readonly HashSet<string> loggedOnce = new();
+
+        private void LogOnce(string key, string message)
+        {
+            if (loggedOnce.Add(key))
+                Logger.LogError("{Message}", message);
         }
 
         private void OnSuperZeusButtons(CCSPlayerController player, PlayerButtons pressed)
         {
-            if (!superZeusEnabled || (pressed & PlayerButtons.Attack2) == 0)
+            if ((pressed & PlayerButtons.Attack2) == 0)
                 return;
 
             if (player == null || !player.IsValid || !player.PawnIsAlive)
@@ -243,6 +299,13 @@ namespace ZeusOnlyMode
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
                 return;
 
+            // From here every right-click with the Zeus logs its outcome
+            if (!superZeusEnabled)
+            {
+                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus is off", player.PlayerName);
+                return;
+            }
+
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
                 return;
@@ -251,10 +314,12 @@ namespace ZeusOnlyMode
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
+                Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
                 pawn.EmitSound("Weapon_Taser.ChargeNotReady");
                 return;
             }
 
+            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
             ConsumeZeusCharge(zeus);
             FireLightningBall(player, pawn, zeus);
@@ -330,7 +395,10 @@ namespace ZeusOnlyMode
             // An invisible decoy carries the ball so the engine handles world collision for us
             var projectile = Utilities.CreateEntityByName<CDecoyProjectile>("decoy_projectile");
             if (projectile == null)
+            {
+                Logger.LogError("[SuperZeus] Could not create the ball's carrier entity; no ball for {Name}", player.PlayerName);
                 return;
+            }
 
             projectile.TeamNum = pawn.TeamNum;
             projectile.Thrower.Raw = pawn.EntityHandle.Raw;
