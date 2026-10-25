@@ -17,7 +17,7 @@ Admins (@css/generic) can type superzeus or css_superzeus in console, or !superz
 to toggle Super Zeus. The chat message is never shown to players. Add 1 or 0 to force it on or off. Super Zeus stays on across map changes and plugin reloads until it is turned off.
 
 While Super Zeus is on, any player can right-click with the Zeus to hurl a lightning
-ball. It costs the same charge as a normal zap, so it shares the Zeus's recharge. Enemies it hits take 34 damage, and bodies it kills are launched across the map; teammates are never hurt, and the ball
+ball. Balls fire three times as fast as the normal zap (a three-ball energy pool that refills over mp_taser_recharge_time), and a normal zap empties the pool. Enemies it hits take 34 damage, and bodies it kills are launched across the map; teammates are never hurt, and the ball
 dissipates on them like it hit a wall. It explodes on walls and fizzles out after 2.5 seconds.
 Super Zeus works with or without Zeus Only Mode.
 

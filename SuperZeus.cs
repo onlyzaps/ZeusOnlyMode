@@ -27,7 +27,7 @@ namespace ZeusOnlyMode
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
         private const float BallLifetime = 2.5f;
-        private const float BallCooldown = 1.0f;
+        private const float MinBallGap = 0.1f;   // keeps a full pool from firing on one tick
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
         private const float PlayerHullRadius = 16f;  // half of the 32-unit player hull
         private const float PlayerHullHeight = 72f;
@@ -62,13 +62,19 @@ namespace ZeusOnlyMode
         private const string FxImpactArcs = "particles/generic_fx/fx_electric_arc_spark.vpcf";
         private const string FxImpactDebris = "particles/impact_fx/impact_electronic.vpcf";
 
+        // Burn-out and scorch effects (all stock, control point 0 only)
+        private const string FxScorch = "particles/burning_fx/barrel_fire_scortch.vpcf";       // projected triplanar scorch, held while the entity lives
+        private const string FxBurnFire = "particles/burning_fx/env_fire_small.vpcf";          // small fire with embers
+        private const string FxBurnSmoke = "particles/burning_fx/barrel_burning_engine_smoke_dark.vpcf";
+
         private const string BallCarrierModel = "weapons/models/grenade/decoy/weapon_decoy.vmdl";
 
         private static readonly string[] SuperZeusResources =
         {
             BallCarrierModel,
             FxBallGlow, FxBallSparks, FxMuzzleGlow, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
-            FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris
+            FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris,
+            FxScorch, FxBurnFire, FxBurnSmoke
         };
 
         private static readonly Color ArcCoreColor = Color.FromArgb(255, 210, 240, 255);
@@ -78,17 +84,10 @@ namespace ZeusOnlyMode
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
-        private readonly List<PendingRecharge> pendingRecharges = new();
         private ConVar? taserRechargeCvar;
 
         // CS2's stock mp_taser_recharge_time, used if the cvar can't be read
         private const float DefaultTaserRechargeSeconds = 30f;
-
-        private sealed class PendingRecharge
-        {
-            public required CHandle<CWeaponTaser> Zeus;
-            public required float ReadyAt;
-        }
 
         // One crackling arc: jagged points stored relative to the ball so the
         // arc travels with it, each segment drawn as a dim wide glow beam with
@@ -186,17 +185,17 @@ namespace ZeusOnlyMode
             {
                 lightningBalls.Clear();
                 ballSparks.Clear();
-                ballsLeftInCharge.Clear();
+                ballEnergy.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
                 bodyFades.Clear();
+                scorches.Clear();
                 hiddenPawns.Clear();
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
                 loggedOnce.Clear();
                 nextHeartbeat = 0f;
-                pendingRecharges.Clear();
                 taserRechargeCvar = null;
                 teammatesAreEnemiesCvar = null;
             });
@@ -412,13 +411,9 @@ namespace ZeusOnlyMode
 
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
-            {
-                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name}'s ball cooldown has {Left:0.00}s left", player.PlayerName, readyAt - now);
-                return;
-            }
+                return; // within the 0.1s minimum gap between balls
 
-            // One Zeus charge is good for BallsPerCharge balls; the last one
-            // drains it and starts the normal recharge
+            // A normal zap's charge still gates the ball
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
@@ -427,26 +422,38 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            nextBallTime[player.Slot] = now + BallCooldown;
-            int left = (ballsLeftInCharge.TryGetValue(zeus.Index, out var remaining) ? remaining : BallsPerCharge) - 1;
-            if (left <= 0)
+            float energy = BallEnergy(zeus.Index, now);
+            if (energy < 1f)
             {
-                ballsLeftInCharge.Remove(zeus.Index);
-                ConsumeZeusCharge(zeus);
+                Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: ball energy {Energy:0.00}/{Max} (refilling)", player.PlayerName, energy, BallsPerCharge);
+                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
+                return;
             }
-            else
-            {
-                ballsLeftInCharge[zeus.Index] = left;
-            }
-            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball ({Left} left in this charge)", player.PlayerName, Math.Max(left, 0));
+
+            ballEnergy[zeus.Index] = (energy - 1f, now);
+            nextBallTime[player.Slot] = now + MinBallGap;
+            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, BallsPerCharge);
             FireLightningBall(player, pawn, zeus);
         }
 
+        // Balls fire three times as fast as the normal zap: each ball spends
+        // one point of a three-point pool that refills three points per
+        // mp_taser_recharge_time (the zap's own refire time). A normal zap
+        // empties the pool. Balls don't spend the zap's charge, which would
+        // cap them at the zap's rate.
         private const int BallsPerCharge = 3;
 
-        // Balls still available in each Zeus's current charge, by weapon index
-        // (missing = a fresh charge). A normal zap spends the whole charge.
-        private readonly Dictionary<uint, int> ballsLeftInCharge = new();
+        // Ball energy per Zeus (weapon index): value and when it was last updated
+        private readonly Dictionary<uint, (float Value, float At)> ballEnergy = new();
+
+        private float BallEnergy(uint zeusIndex, float now)
+        {
+            if (!ballEnergy.TryGetValue(zeusIndex, out var state))
+                return BallsPerCharge;
+
+            float perSecond = BallsPerCharge / Math.Max(TaserRechargeSeconds(), 0.05f);
+            return Math.Min(BallsPerCharge, state.Value + (now - state.At) * perSecond);
+        }
 
         private HookResult OnZeusZapForBalls(EventWeaponFire ev, GameEventInfo info)
         {
@@ -455,28 +462,8 @@ namespace ZeusOnlyMode
 
             var weapon = ev.Userid?.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
             if (weapon != null && weapon.IsValid)
-                ballsLeftInCharge.Remove(weapon.Index);
+                ballEnergy[weapon.Index] = (0f, Server.CurrentTime);
             return HookResult.Continue;
-        }
-
-        // Spend the charge like a primary fire does. Setting the fire time
-        // drives the HUD's recharge meter, but the server-side refill a real
-        // shot schedules isn't reachable from here, so the meter would stall
-        // at 99% forever. We finish the recharge ourselves at the same moment
-        // the meter fills (mp_taser_recharge_time after the shot).
-        private void ConsumeZeusCharge(CWeaponTaser zeus)
-        {
-            zeus.Clip1 -= 1;
-            zeus.FireTime = Server.CurrentTime;
-            zeus.LastAttackTick = Server.TickCount;
-            Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
-            Utilities.SetStateChanged(zeus, "CWeaponTaser", "m_fFireTime");
-
-            pendingRecharges.Add(new PendingRecharge
-            {
-                Zeus = HandleOf(zeus),
-                ReadyAt = Server.CurrentTime + TaserRechargeSeconds()
-            });
         }
 
         private float TaserRechargeSeconds()
@@ -485,35 +472,6 @@ namespace ZeusOnlyMode
             return float.TryParse(taserRechargeCvar?.StringValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
                 ? Math.Max(seconds, 0f)
                 : DefaultTaserRechargeSeconds;
-        }
-
-        private void ProcessPendingRecharges()
-        {
-            float now = Server.CurrentTime;
-            for (int i = pendingRecharges.Count - 1; i >= 0; i--)
-            {
-                var pending = pendingRecharges[i];
-                var zeus = pending.Zeus.Value;
-
-                // Gone, or already refilled (by the game or a fresh zeus)
-                if (zeus == null || !zeus.IsValid || zeus.Clip1 > 0)
-                {
-                    pendingRecharges.RemoveAt(i);
-                    continue;
-                }
-
-                if (now < pending.ReadyAt)
-                    continue;
-
-                zeus.Clip1 = Math.Max(1, zeus.VData?.MaxClip1 ?? 1);
-                Utilities.SetStateChanged(zeus, "CBasePlayerWeapon", "m_iClip1");
-
-                var owner = zeus.OwnerEntity.Value;
-                if (owner != null && owner.IsValid)
-                    owner.EmitSound("Weapon_Taser.ChargeReady");
-
-                pendingRecharges.RemoveAt(i);
-            }
         }
 
         private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
@@ -651,9 +609,6 @@ namespace ZeusOnlyMode
 
         private void OnSuperZeusTick()
         {
-            if (pendingRecharges.Count > 0)
-                ProcessPendingRecharges();
-
             if (ballSparks.Count > 0)
                 UpdateBallSparks();
 
@@ -952,7 +907,7 @@ namespace ZeusOnlyMode
         // instead. CS2 reuses that pawn when the player respawns, so it's made
         // visible again on spawn, round start and map change.
 
-        private const float BodyFadeTime = 0.25f;
+        private const float BodyFadeTime = 1.2f;
 
         private sealed class BodyFade
         {
@@ -981,17 +936,26 @@ namespace ZeusOnlyMode
 
                 try
                 {
+                    // Burning away: the body chars to charcoal over the first
+                    // half, then fades out over the second
                     float t = (now - fade.Start) / BodyFadeTime;
                     hiddenPawns.Add(pawn.Index);
                     if (t >= 1f)
                     {
-                        SetPawnRender(pawn, RenderMode_t.kRenderNone, 0);
-                        Logger.LogInformation("[SuperZeus] {Name}: body faded out", fade.Name);
+                        SetPawnRender(pawn, RenderMode_t.kRenderNone, Color.FromArgb(0, CharredColor));
+                        Logger.LogInformation("[SuperZeus] {Name}: body burned away", fade.Name);
                         bodyFades.RemoveAt(i);
                     }
                     else
                     {
-                        SetPawnRender(pawn, RenderMode_t.kRenderTransAlpha, (int)(255 * (1f - t)));
+                        float charring = Math.Min(1f, t * 2f);
+                        float fading = Math.Max(0f, t * 2f - 1f);
+                        var c = Color.FromArgb(
+                            (int)(255 * (1f - fading)),
+                            (int)(255 + (CharredColor.R - 255) * charring),
+                            (int)(255 + (CharredColor.G - 255) * charring),
+                            (int)(255 + (CharredColor.B - 255) * charring));
+                        SetPawnRender(pawn, RenderMode_t.kRenderTransAlpha, c);
                     }
                 }
                 catch (Exception ex)
@@ -1002,11 +966,12 @@ namespace ZeusOnlyMode
             }
         }
 
-        private static void SetPawnRender(CCSPlayerPawn pawn, RenderMode_t mode, int alpha)
+        private static readonly Color CharredColor = Color.FromArgb(255, 35, 30, 28);
+
+        private static void SetPawnRender(CCSPlayerPawn pawn, RenderMode_t mode, Color color)
         {
-            var c = pawn.Render;
             pawn.RenderMode = mode;
-            pawn.Render = Color.FromArgb(Math.Clamp(alpha, 0, 255), c.R, c.G, c.B);
+            pawn.Render = color;
             Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_nRenderMode");
             Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_clrRender");
         }
@@ -1017,7 +982,7 @@ namespace ZeusOnlyMode
             if (pawn == null || !pawn.IsValid || !hiddenPawns.Remove(pawn.Index))
                 return;
 
-            try { SetPawnRender(pawn, RenderMode_t.kRenderNormal, 255); }
+            try { SetPawnRender(pawn, RenderMode_t.kRenderNormal, Color.FromArgb(255, 255, 255, 255)); }
             catch (Exception ex) { Logger.LogError("[SuperZeus] Restoring a faded body failed: {Message}", ex.Message); }
         }
 
@@ -1068,6 +1033,13 @@ namespace ZeusOnlyMode
             EmitBurstSparks(center, glow, 40, 180f, 520f);
             ImpactBurst(center);
 
+            // Burn it out: a fire with embers and thick dark smoke where the
+            // body lies. Each stops emitting and its last particles finish
+            // before the entity is removed, so it dies down instead of popping.
+            var ground = center - new Vector3(0, 0, PlayerHullHeight * 0.3f);
+            SpawnFading(FxBurnFire, ground, BurnFireTime, BurnFireLinger);
+            SpawnFading(FxBurnSmoke, ground, BurnSmokeTime, BurnSmokeLinger);
+
             var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
             flash?.EmitSound("Weapon_Taser.Hit");
             flash?.EmitSound("DoSpark");
@@ -1075,6 +1047,27 @@ namespace ZeusOnlyMode
         }
 
         private const float DisintegrateCrackleLife = 0.4f;
+
+        private const float BurnFireTime = 1.1f, BurnFireLinger = 2.5f;
+        private const float BurnSmokeTime = 2.5f, BurnSmokeLinger = 5f;
+
+        // A looping effect that stops emitting after `emit` seconds and is
+        // removed `linger` seconds after that, once its particles have faded
+        private void SpawnFading(string effect, Vector3 pos, float emit, float linger)
+        {
+            var particle = SpawnParticle(effect, pos, Vector3.Zero, 0f);
+            if (particle == null)
+                return;
+
+            var handle = HandleOf(particle);
+            AddTimer(emit, () =>
+            {
+                var p = handle.Value;
+                if (p != null && p.IsValid)
+                    p.AcceptInput("Stop");
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+            RemoveLater(handle, emit + linger);
+        }
         private const int DisintegrateCrackleArcs = 12;
 
         // 34 damage with the shooter's credit and the launch on the damage
@@ -1253,9 +1246,33 @@ namespace ZeusOnlyMode
 
         private void WallBurst(Vector3 pos)
         {
+            LeaveScorch(pos);
             var burst = ImpactBurst(pos);
             burst?.EmitSound("Weapon_Taser.Hit");
             burst?.EmitSound("DoSpark");
+        }
+
+        // --- Scorch marks -----------------------------------------------------
+        //
+        // A burn mark where a ball hits the world: the stock barrel-fire scorch
+        // is a triplanar projected decal, so it marks walls, floors and
+        // ceilings whichever way they face. It lasts as long as its entity, so
+        // each mark is kept ScorchLifetime seconds, and only the newest
+        // MaxScorches are kept.
+        private const float ScorchLifetime = 20f;
+        private const int MaxScorches = 24;
+
+        private readonly Queue<CHandle<CParticleSystem>> scorches = new();
+
+        private void LeaveScorch(Vector3 pos)
+        {
+            var scorch = SpawnParticle(FxScorch, pos, Vector3.Zero, ScorchLifetime);
+            if (scorch == null)
+                return;
+
+            scorches.Enqueue(HandleOf(scorch));
+            while (scorches.Count > MaxScorches)
+                RemoveEntity(scorches.Dequeue());
         }
 
         private CParticleSystem? ImpactBurst(Vector3 pos)
@@ -1716,6 +1733,8 @@ namespace ZeusOnlyMode
             ClearBodyZaps();
             bodyZapsByPawn.Clear();
             RestoreAllPawns();
+            while (scorches.Count > 0)
+                RemoveEntity(scorches.Dequeue());
         }
 
         // Handles survive round restarts safely, unlike raw entity references held across ticks
