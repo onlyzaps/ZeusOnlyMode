@@ -33,6 +33,11 @@ namespace ZeusOnlyMode
         // (horizontal speed along the ball's path, plus 30% of it upward)
         private const float RagdollLaunchSpeed = 2400f;
 
+        // Launch impulses are this many times the launch velocity: the body gets
+        // the full push, the dropped gun half of it
+        private const float RagdollForceScale = 100f;
+        private const float DroppedGunForceScale = 50f;
+
         // Damage per lightning ball hit (a little over a third of full health)
         private const int BallDamage = 34;
 
@@ -658,11 +663,11 @@ namespace ZeusOnlyMode
 
         // Different team, or any other player when teammates are enemies
         // (free-for-all deathmatch and similar modes)
-        private bool IsEnemy(CCSPlayerController player, LightningBall ball)
-        {
-            if (player.TeamNum != ball.OwnerTeam)
-                return true;
+        private bool IsEnemy(CCSPlayerController player, LightningBall ball) =>
+            player.TeamNum != ball.OwnerTeam || TeammatesAreEnemies();
 
+        private bool TeammatesAreEnemies()
+        {
             teammatesAreEnemiesCvar ??= ConVar.Find("mp_teammates_are_enemies");
             return teammatesAreEnemiesCvar?.StringValue is "1" or "true";
         }
@@ -797,7 +802,7 @@ namespace ZeusOnlyMode
 
             if (killed)
             {
-                try { StampRagdollImpulse(pawn, launch); }
+                try { Logger.LogInformation("[SuperZeus] {Name} ragdoll: {Info}", victim.PlayerName, StampRagdollImpulse(pawn, launch)); }
                 catch (Exception ex) { Logger.LogError("[SuperZeus] Ragdoll launch failed: {Message}", ex.Message); }
             }
 
@@ -836,6 +841,9 @@ namespace ZeusOnlyMode
                 return HookResult.Continue;
 
             var attacker = pending.Attacker;
+            if (attacker != null && attacker.IsValid && attacker.TeamNum == entity.TeamNum && !TeammatesAreEnemies())
+                return HookResult.Continue;
+
             if (attacker != null && attacker.IsValid)
             {
                 info.Attacker.Raw = attacker.EntityHandle.Raw;
@@ -844,10 +852,15 @@ namespace ZeusOnlyMode
                     info.Ability.Raw = pending.Zeus.EntityHandle.Raw;
             }
 
+            // The damage-time force is what the dropped gun gets thrown with,
+            // so it's half the body's; the body's own push is stamped after
+            // death (StampRagdollImpulse). The chest hit group gives the game
+            // a body location for the ragdoll push.
             var direction = Vector3.Normalize(pending.Launch);
-            info.DamageForce.X = pending.Launch.X * 100f;
-            info.DamageForce.Y = pending.Launch.Y * 100f;
-            info.DamageForce.Z = pending.Launch.Z * 100f;
+            info.DamageForce.X = pending.Launch.X * DroppedGunForceScale;
+            info.DamageForce.Y = pending.Launch.Y * DroppedGunForceScale;
+            info.DamageForce.Z = pending.Launch.Z * DroppedGunForceScale;
+            info.HitGroupId = HitGroup_t.HITGROUP_CHEST;
             info.DamagePosition.X = pending.At.X;
             info.DamagePosition.Y = pending.At.Y;
             info.DamagePosition.Z = pending.At.Z;
@@ -925,13 +938,27 @@ namespace ZeusOnlyMode
         // go between CS2 updates (m_vRagdollDamagePosition was removed), and a
         // missing member only fails the method that references it. Isolated
         // here, that can never stop the kill in StrikeVictim.
+        //
+        // The client applies the ragdoll push at m_nRagdollDamageBone. Damage
+        // from point_hurt carries no hit location, so the game can leave that
+        // bone unset and the push goes nowhere (the gun flew, the body didn't).
+        // If it's unset, point it at the pelvis (bone 0) so the push lands.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void StampRagdollImpulse(CCSPlayerPawn pawn, Vector3 launch)
+        private static string StampRagdollImpulse(CCSPlayerPawn pawn, Vector3 launch)
         {
-            pawn.RagdollDamageForce.X = launch.X * 100f;
-            pawn.RagdollDamageForce.Y = launch.Y * 100f;
-            pawn.RagdollDamageForce.Z = launch.Z * 100f;
+            int gameBone = pawn.RagdollDamageBone;
+            if (gameBone < 0)
+            {
+                pawn.RagdollDamageBone = 0;
+                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_nRagdollDamageBone");
+            }
+
+            pawn.RagdollDamageForce.X = launch.X * RagdollForceScale;
+            pawn.RagdollDamageForce.Y = launch.Y * RagdollForceScale;
+            pawn.RagdollDamageForce.Z = launch.Z * RagdollForceScale;
             Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_vRagdollDamageForce");
+
+            return $"game bone {gameBone}, using bone {pawn.RagdollDamageBone}";
         }
 
         // Forced suicide; if the pawn is somehow still alive, fall back to the
