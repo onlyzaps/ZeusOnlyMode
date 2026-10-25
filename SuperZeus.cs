@@ -174,7 +174,7 @@ namespace ZeusOnlyMode
             RegisterListener<Listeners.OnTick>(PollButtons);
             RegisterListener<Listeners.OnEntityTakeDamagePre>(OnBallDamagePre);
             RegisterEventHandler<EventWeaponFire>(OnZeusZapForBalls);
-            RegisterEventHandler<EventRagdollDissolved>(OnRagdollDissolved);
+            RegisterEventHandler<EventPlayerSpawn>(OnSpawnRestoreBody);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
             RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
@@ -189,7 +189,8 @@ namespace ZeusOnlyMode
                 ballsLeftInCharge.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
-                shockRings.Clear();
+                bodyFades.Clear();
+                hiddenPawns.Clear();
                 pendingBallForces.Clear();
                 nextBallTime.Clear();
                 lastButtons.Clear();
@@ -379,16 +380,28 @@ namespace ZeusOnlyMode
             if ((pressed & PlayerButtons.Attack2) == 0)
                 return;
 
+            // Every right-click that doesn't fire logs why
             if (player == null || !player.IsValid || !player.PawnIsAlive)
+            {
+                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is not alive", player?.PlayerName ?? "?");
                 return;
+            }
 
             var pawn = player.PlayerPawn.Value;
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
+            {
+                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} has no pawn", player.PlayerName);
                 return;
+            }
 
             var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
+            {
+                if (superZeusEnabled)
+                    Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is holding {Weapon}, not the Zeus",
+                        player.PlayerName, weapon != null && weapon.IsValid ? weapon.DesignerName : "nothing");
                 return;
+            }
 
             // From here every right-click with the Zeus logs its outcome
             if (!superZeusEnabled)
@@ -399,7 +412,10 @@ namespace ZeusOnlyMode
 
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
+            {
+                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name}'s ball cooldown has {Left:0.00}s left", player.PlayerName, readyAt - now);
                 return;
+            }
 
             // One Zeus charge is good for BallsPerCharge balls; the last one
             // drains it and starts the normal recharge
@@ -644,8 +660,8 @@ namespace ZeusOnlyMode
             if (bodyZaps.Count > 0)
                 UpdateBodyZaps();
 
-            if (shockRings.Count > 0)
-                UpdateShockRings();
+            if (bodyFades.Count > 0)
+                UpdateBodyFades();
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
@@ -907,12 +923,8 @@ namespace ZeusOnlyMode
 
         // --- Disintegration ---------------------------------------------------
         //
-        // The engine still has Source's dissolve effect (CEntityDissolve, an
-        // electrical dissolve type, and a ragdoll_dissolved event). The body is
-        // drawn by each client from the dead player's pawn, so the dissolve is
-        // aimed at the pawn, both ways the engine offers: the pawn's own
-        // dissolve start time, and an env_entity_dissolver targeting it. Each
-        // step is logged, and ragdoll_dissolved is logged if the game reports it.
+        // A killed body disintegrates: the effects below play where the body
+        // should be, and the body itself fades out (see Body fade).
 
         private const float DisintegrateDelay = 0.6f;   // let the body fly first
 
@@ -928,44 +940,108 @@ namespace ZeusOnlyMode
             try { DisintegrationShow(pawn, color); }
             catch (Exception ex) { Logger.LogError("[SuperZeus] {Name}: disintegration effects failed: {Message}", name, ex.Message); }
 
-            try
-            {
-                pawn.DissolveStartTime = Server.CurrentTime;
-                Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_flDissolveStartTime");
-                Logger.LogInformation("[SuperZeus] {Name}: set dissolve start time", name);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError("[SuperZeus] {Name}: dissolve start time failed: {Message}", name, ex.Message);
-            }
+            bodyFades.Add(new BodyFade { Pawn = pawnHandle, Name = name, Start = Server.CurrentTime });
+        }
 
-            try
+        // --- Body fade --------------------------------------------------------
+        //
+        // The engine's dissolve does nothing in CS2 (the dissolve time isn't
+        // networked, and env_entity_dissolver never dissolved a body). The dead
+        // body is drawn from the player's own pawn, whose render mode and color
+        // are networked, so the body is faded to invisible under the effects
+        // instead. CS2 reuses that pawn when the player respawns, so it's made
+        // visible again on spawn, round start and map change.
+
+        private const float BodyFadeTime = 0.25f;
+
+        private sealed class BodyFade
+        {
+            public required CHandle<CCSPlayerPawn> Pawn;
+            public required string Name;
+            public required float Start;
+        }
+
+        private readonly List<BodyFade> bodyFades = new();
+        private readonly HashSet<uint> hiddenPawns = new();
+
+        private void UpdateBodyFades()
+        {
+            float now = Server.CurrentTime;
+            for (int i = bodyFades.Count - 1; i >= 0; i--)
             {
-                var dissolver = Utilities.CreateEntityByName<CEntityDissolve>("env_entity_dissolver");
-                var identity = pawn.Entity;
-                if (dissolver == null || identity == null)
+                var fade = bodyFades[i];
+                var pawn = fade.Pawn.Value;
+
+                // Gone, or alive again (respawned before the fade finished)
+                if (pawn == null || !pawn.IsValid || pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE)
                 {
-                    Logger.LogInformation("[SuperZeus] {Name}: could not create env_entity_dissolver", name);
-                    return;
+                    bodyFades.RemoveAt(i);
+                    continue;
                 }
 
-                string targetName = $"zeusball_dissolve_{pawn.Index}";
-                identity.Name = targetName;
-
-                dissolver.DissolveType = EntityDissolveType_t.ENTITY_DISSOLVE_ELECTRICAL;
-                dissolver.Magnitude = 250;
-                if (pawn.AbsOrigin != null)
-                    dissolver.Teleport(ToVec3(pawn.AbsOrigin), Vector3.Zero, Vector3.Zero);
-                dissolver.DispatchSpawn();
-                dissolver.AcceptInput("Dissolve", pawn, dissolver, targetName);
-                Logger.LogInformation("[SuperZeus] {Name}: fired env_entity_dissolver at the body", name);
-
-                RemoveLater(HandleOf(dissolver), 3f);
+                try
+                {
+                    float t = (now - fade.Start) / BodyFadeTime;
+                    hiddenPawns.Add(pawn.Index);
+                    if (t >= 1f)
+                    {
+                        SetPawnRender(pawn, RenderMode_t.kRenderNone, 0);
+                        Logger.LogInformation("[SuperZeus] {Name}: body faded out", fade.Name);
+                        bodyFades.RemoveAt(i);
+                    }
+                    else
+                    {
+                        SetPawnRender(pawn, RenderMode_t.kRenderTransAlpha, (int)(255 * (1f - t)));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("[SuperZeus] {Name}: body fade failed: {Message}", fade.Name, ex.Message);
+                    bodyFades.RemoveAt(i);
+                }
             }
-            catch (Exception ex)
+        }
+
+        private static void SetPawnRender(CCSPlayerPawn pawn, RenderMode_t mode, int alpha)
+        {
+            var c = pawn.Render;
+            pawn.RenderMode = mode;
+            pawn.Render = Color.FromArgb(Math.Clamp(alpha, 0, 255), c.R, c.G, c.B);
+            Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_nRenderMode");
+            Utilities.SetStateChanged(pawn, "CBaseModelEntity", "m_clrRender");
+        }
+
+        // Make a reused pawn visible again
+        private void RestorePawn(CCSPlayerPawn? pawn)
+        {
+            if (pawn == null || !pawn.IsValid || !hiddenPawns.Remove(pawn.Index))
+                return;
+
+            try { SetPawnRender(pawn, RenderMode_t.kRenderNormal, 255); }
+            catch (Exception ex) { Logger.LogError("[SuperZeus] Restoring a faded body failed: {Message}", ex.Message); }
+        }
+
+        private void RestoreAllPawns()
+        {
+            bodyFades.Clear();
+            foreach (var player in Utilities.GetPlayers())
             {
-                Logger.LogError("[SuperZeus] {Name}: env_entity_dissolver failed: {Message}", name, ex.Message);
+                var pawn = player?.PlayerPawn.Value;
+                if (pawn != null && pawn.IsValid && hiddenPawns.Contains(pawn.Index))
+                    RestorePawn(pawn);
             }
+            hiddenPawns.Clear();
+        }
+
+        private HookResult OnSpawnRestoreBody(EventPlayerSpawn ev, GameEventInfo info)
+        {
+            var player = ev.Userid;
+            Server.NextFrame(() =>
+            {
+                if (player != null && player.IsValid)
+                    RestorePawn(player.PlayerPawn.Value);
+            });
+            return HookResult.Continue;
         }
 
         // The show around the dissolve, centered on where the body should be:
@@ -989,7 +1065,6 @@ namespace ZeusOnlyMode
             var feet = center - new Vector3(0, 0, PlayerHullHeight * 0.5f);
 
             StartBodyZap(feet, drift, color, null, DisintegrateCrackleLife, DisintegrateCrackleArcs);
-            shockRings.Add(new ShockRing(this, center, glow));
             EmitBurstSparks(center, glow, 40, 180f, 520f);
             ImpactBurst(center);
 
@@ -999,91 +1074,8 @@ namespace ZeusOnlyMode
             flash?.EmitSound("Breakable.Spark");
         }
 
-        private const float DisintegrateCrackleLife = 1.6f;
+        private const float DisintegrateCrackleLife = 0.4f;
         private const int DisintegrateCrackleArcs = 12;
-
-        // An expanding, fading ring of light
-        private const int ShockRingSegments = 24;
-        private const float ShockRingLife = 0.4f;
-        private const float ShockRingStartRadius = 12f;
-        private const float ShockRingEndRadius = 140f;
-
-        private readonly List<ShockRing> shockRings = new();
-
-        private sealed class ShockRing
-        {
-            private readonly List<CHandle<CBeam>> beams = new();
-            private readonly Vector3 center;
-            private readonly Color color;
-            private readonly float born;
-
-            public ShockRing(ZeusOnlyPlugin plugin, Vector3 center, Color color)
-            {
-                this.center = center;
-                this.color = color;
-                born = Server.CurrentTime;
-                for (int i = 0; i < ShockRingSegments; i++)
-                {
-                    var beam = CreateBeam(center, center, color, 3f, 3f);
-                    if (beam != null) beams.Add(HandleOf(beam));
-                }
-                Update();
-            }
-
-            // Returns false once the ring has faded
-            public bool Update()
-            {
-                float t = (Server.CurrentTime - born) / ShockRingLife;
-                if (t >= 1f)
-                {
-                    Destroy();
-                    return false;
-                }
-
-                float radius = ShockRingStartRadius + (ShockRingEndRadius - ShockRingStartRadius) * MathF.Sqrt(t);
-                float width = 3f * (1f - t) + 0.4f;
-                var tint = Scale(Whiten(color, 0.3f * (1f - t)), 1f - t);
-
-                for (int i = 0; i < beams.Count; i++)
-                {
-                    var beam = beams[i].Value;
-                    if (beam == null || !beam.IsValid) continue;
-
-                    float a0 = i / (float)ShockRingSegments * MathF.PI * 2f;
-                    float a1 = (i + 1) / (float)ShockRingSegments * MathF.PI * 2f;
-                    var p0 = center + new Vector3(MathF.Cos(a0) * radius, MathF.Sin(a0) * radius, 0f);
-                    var p1 = center + new Vector3(MathF.Cos(a1) * radius, MathF.Sin(a1) * radius, 0f);
-
-                    beam.Teleport(p0, Vector3.Zero, Vector3.Zero);
-                    SetBeamEnd(beam, p1, true);
-                    beam.Width = width;
-                    beam.EndWidth = width;
-                    beam.Render = tint;
-                    Utilities.SetStateChanged(beam, "CBeam", "m_fWidth");
-                    Utilities.SetStateChanged(beam, "CBeam", "m_fEndWidth");
-                    Utilities.SetStateChanged(beam, "CBaseModelEntity", "m_clrRender");
-                }
-                return true;
-            }
-
-            public void Destroy()
-            {
-                foreach (var beam in beams) RemoveEntity(beam);
-            }
-        }
-
-        private void UpdateShockRings()
-        {
-            for (int i = shockRings.Count - 1; i >= 0; i--)
-                if (!shockRings[i].Update())
-                    shockRings.RemoveAt(i);
-        }
-
-        private HookResult OnRagdollDissolved(EventRagdollDissolved ev, GameEventInfo info)
-        {
-            Logger.LogInformation("[SuperZeus] Game reported a ragdoll dissolved (entity {Index})", ev.Entindex);
-            return HookResult.Continue;
-        }
 
         // 34 damage with the shooter's credit and the launch on the damage
         private void ApplyBallDamage(CCSPlayerPawn pawn, string name, CCSPlayerPawn? shooterPawn, Vector3 launch, Vector3 chest, int before)
@@ -1493,8 +1485,8 @@ namespace ZeusOnlyMode
 
         private const int BodyZapArcs = 5;
         private const int BodyZapSegments = 3;
-        private const float BodyZapLife = 0.9f;      // on a kill
-        private const float BodyZapHitLife = 0.5f;   // on a survivor
+        private const float BodyZapLife = 0.35f;     // on a kill
+        private const float BodyZapHitLife = 0.2f;   // on a survivor
         private const float BodyZapFade = 0.3f;
         private const float BodyGravity = 800f;
         private const float BodyGroundFriction = 6f;
@@ -1723,8 +1715,7 @@ namespace ZeusOnlyMode
             ClearBallSparks();
             ClearBodyZaps();
             bodyZapsByPawn.Clear();
-            foreach (var ring in shockRings) ring.Destroy();
-            shockRings.Clear();
+            RestoreAllPawns();
         }
 
         // Handles survive round restarts safely, unlike raw entity references held across ticks
