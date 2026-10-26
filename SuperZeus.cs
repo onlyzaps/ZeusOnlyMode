@@ -368,7 +368,11 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventWeaponFire>(OnZeusZapForBalls);
             RegisterEventHandler<EventPlayerSpawn>(OnSpawnRestoreBody);
             RegisterListener<Listeners.OnTick>(OnSuperZeusTick);
-            RegisterListener<Listeners.OnClientDisconnect>(slot => lastButtons.Remove(slot));
+            RegisterListener<Listeners.OnClientDisconnect>(slot =>
+            {
+                lastButtons.Remove(slot);
+                noFallDamageUntil.Remove(slot);
+            });
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
             {
                 foreach (var resource in SuperZeusResources)
@@ -381,6 +385,7 @@ namespace ZeusOnlyMode
                 pendingRecharges.Clear();
                 ballEnergy.Clear();
                 grapples.Clear();
+                noFallDamageUntil.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
                 bodyFades.Clear();
@@ -1493,6 +1498,9 @@ namespace ZeusOnlyMode
         //    (as an impulse, ~100x the velocity) and is what sends bodies flying
         private HookResult OnBallDamagePre(CBaseEntity entity, CTakeDamageInfo info)
         {
+            if (entity != null && entity.IsValid && FallProtected(entity, info))
+                return HookResult.Handled;
+
             if (pendingBallForces.Count == 0 || entity == null || !entity.IsValid
                 || !pendingBallForces.TryGetValue(entity.Index, out var pending))
                 return HookResult.Continue;

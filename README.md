@@ -32,7 +32,7 @@ Fire modes (right-click with the Zeus):
   the next surface.
 - Grapple: shoots a single line that costs a charge. When its tip catches a wall or floor you are pulled there quickly. If the tip
   itself hits an enemy they are killed, and you are pulled to where they died. The pull lets go if you stop moving, so it never pins
-  you to a wall or drags you through one.
+  you to a wall or drags you through one. You take no fall damage during the pull or for 3 seconds after it lets go.
 
 A center panel names the mode each time Inspect switches it. Each player's last mode is remembered forever in
 addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/fire_modes.json (with superzeus 1 everyone fires the lightning ball,

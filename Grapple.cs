@@ -55,6 +55,32 @@ namespace ZeusOnlyMode
 
         private readonly List<Grapple> grapples = new();
 
+        // No fall damage from contact, through the pull, until this long after
+        // the line lets go, by player slot
+        private const float GrappleNoFallDamage = 3f;
+        private readonly Dictionary<int, float> noFallDamageUntil = new();
+
+        // Called from the damage hook: true blocks this fall damage
+        private bool FallProtected(CBaseEntity entity, CTakeDamageInfo info)
+        {
+            if (noFallDamageUntil.Count == 0 || (info.BitsDamageType & DamageTypes_t.DMG_FALL) == 0 || entity.DesignerName != "player")
+                return false;
+
+            var controller = entity.As<CCSPlayerPawn>().Controller.Value?.As<CCSPlayerController>();
+            if (controller == null || !controller.IsValid || !noFallDamageUntil.TryGetValue(controller.Slot, out var until))
+                return false;
+
+            if (Server.CurrentTime > until)
+            {
+                noFallDamageUntil.Remove(controller.Slot);
+                return false;
+            }
+
+            Logger.LogInformation("[SuperZeus] Blocked {Damage:0} fall damage to {Name} after a grapple", info.Damage, controller.PlayerName);
+            info.Damage = 0;
+            return true;
+        }
+
         private void FireGrapple(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
         {
             CancelGrapple(player.Slot);
@@ -208,6 +234,7 @@ namespace ZeusOnlyMode
             grapple.Tip = null;
 
             var origin = ToVec3(pawn.AbsOrigin!);
+            noFallDamageUntil[grapple.OwnerSlot] = float.MaxValue;   // until the line lets go
             grapple.Pulling = true;
             grapple.Anchor = anchor;
             grapple.PullStart = now;
@@ -239,6 +266,8 @@ namespace ZeusOnlyMode
 
         private void EndGrapple(Grapple grapple)
         {
+            if (grapple.Pulling)
+                noFallDamageUntil[grapple.OwnerSlot] = Server.CurrentTime + GrappleNoFallDamage;
             if (grapple.Tip != null)
                 RemoveEntity(grapple.Tip);
             if (grapple.Line != null)
