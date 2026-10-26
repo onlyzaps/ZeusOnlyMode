@@ -29,6 +29,10 @@ namespace ZeusOnlyMode
         private const float ChickenMaxSpin = 720f;       // degrees/s per axis
         private const int MaxLandedChickens = 30;        // oldest are removed past this
 
+        // A chicken created by name has no model (map chickens get theirs from
+        // the map), so it existed and clucked but was invisible
+        private const string ChickenModel = "models/chicken/chicken.vmdl";
+
         private const float DefaultChickenSoundVolume = 0.2f;
         private float ChickenSoundVolume = DefaultChickenSoundVolume;
 
@@ -87,6 +91,7 @@ namespace ZeusOnlyMode
 
             var angles = new Vector3(rng.NextSingle() * 360f, rng.NextSingle() * 360f, rng.NextSingle() * 360f);
             chicken.DispatchSpawn();
+            chicken.SetModel(ChickenModel);
             byte group = chicken.Collision?.CollisionGroup ?? (byte)CollisionGroup.COLLISION_GROUP_NONE;
             SetDebrisCollision(chicken);   // flies through players; only the hit test decides a hit
             chicken.Teleport(spawnPos, angles, Vector3.Zero);
@@ -220,6 +225,11 @@ namespace ZeusOnlyMode
                 }
                 chicken.Teleport(null, new Vector3(0f, flying.Angles.Y, 0f), Vector3.Zero);
                 PlaySound(chicken, "Chicken.Idle", ChickenSoundVolume);
+
+                var at = chicken.AbsOrigin;
+                string model = chicken.CBodyComponent?.SceneNode?.GetSkeletonInstance()?.ModelState.ModelName ?? "?";
+                Logger.LogInformation("[SuperZeus] Chicken {Index} landed at ({X:0}, {Y:0}, {Z:0}), model {Model}, render {Mode}/{Alpha}",
+                    chicken.Index, at?.X ?? 0, at?.Y ?? 0, at?.Z ?? 0, model, chicken.RenderMode, chicken.Render.A);
             }
             catch (Exception ex)
             {

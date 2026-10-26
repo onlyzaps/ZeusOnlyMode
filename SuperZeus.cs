@@ -84,7 +84,7 @@ namespace ZeusOnlyMode
 
         private static readonly string[] SuperZeusResources =
         {
-            BallCarrierModel,
+            BallCarrierModel, ChickenModel,
             FxBallGlow, FxBallSparks, FxMuzzleGlow, FxMuzzleSmokePuff, FxMuzzleSmokeTrail,
             FxImpactFlare, FxImpactSparks, FxImpactRing, FxImpactArcs, FxImpactDebris,
             FxScorch, FxBurnFire, FxBurnSmoke
