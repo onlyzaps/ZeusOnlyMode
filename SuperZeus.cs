@@ -227,7 +227,6 @@ namespace ZeusOnlyMode
         private const uint VolumeParamHash = 0xBD6054E9;   // "public.volume"
         private (string Sound, float Volume)? emittingSound;   // set while PlaySound emits
         private readonly Dictionary<uint, (string Sound, float Volume)> recentSounds = new();
-        private int soundLogsLeft;
 
         // volume: null = SoundVolume
         // recipients: null = everyone
@@ -264,28 +263,18 @@ namespace ZeusOnlyMode
             try
             {
                 uint guid = message.ReadUInt("soundevent_guid");
-                bool during = emittingSound != null;
                 (string Sound, float Volume) played;
                 if (emittingSound is { } current)
                     played = current;
                 else if (!recentSounds.TryGetValue(guid, out played))
                     return HookResult.Continue;
 
-                string sound = played.Sound;
                 if (played.Volume >= 1f)
                     return HookResult.Continue;
 
                 byte[] before = message.ReadBytes("packed_params");
                 byte[] after = WithVolume(before, played.Volume);
                 message.SetBytes("packed_params", after);
-
-                if (soundLogsLeft > 0)
-                {
-                    soundLogsLeft--;
-                    Logger.LogInformation("[SuperZeus] {Sound} start (guid {Guid}, {When}): params {Before} -> {After}",
-                        sound, guid, during ? "during EmitSound" : "after EmitSound",
-                        before.Length == 0 ? "(none)" : Convert.ToHexString(before), Convert.ToHexString(after));
-                }
             }
             catch (Exception ex)
             {
@@ -350,7 +339,6 @@ namespace ZeusOnlyMode
             LoadSuperZeusState();
             LoadFireModes();
             LoadCameras();
-            soundLogsLeft = 6;
             HookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
 
             // Both spellings work from console/RCON. CS# also forwards "!superzeus"
@@ -405,7 +393,6 @@ namespace ZeusOnlyMode
                 nextBallTime.Clear();
                 lastButtons.Clear();
                 loggedOnce.Clear();
-                nextHeartbeat = 0f;
                 taserRechargeCvar = null;
                 teammatesAreEnemiesCvar = null;
             });
@@ -433,7 +420,6 @@ namespace ZeusOnlyMode
         [ConsoleCommand("css_superzeus", "Toggle Super Zeus (alt-fire lightning balls)")]
         public void ConCommand_SuperZeus(CCSPlayerController? player, CommandInfo info)
         {
-            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
             ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
         }
 
@@ -464,13 +450,7 @@ namespace ZeusOnlyMode
 
             if (player != null)
             {
-                // Every attempt is logged with the player's admin flags, so a
-                // toggle that "did nothing" can be explained from the console
                 bool allowed = AdminManager.PlayerHasPermissions(player, SuperZeusPermission);
-                var data = AdminManager.GetPlayerAdminData(player);
-                string flags = data == null ? "no admin data" : string.Join(", ", data.Flags.SelectMany(kv => kv.Value));
-                Logger.LogInformation("[SuperZeus] Toggle attempt by {Name} ({SteamId}), arg '{Arg}': {Result}; flags: {Flags}",
-                    player.PlayerName, player.SteamID, arg ?? "", allowed ? "allowed" : "DENIED", flags);
 
                 if (!allowed)
                 {
@@ -538,7 +518,6 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            int polled = 0;
             foreach (var player in players)
             {
                 // Each player is handled inside its own try/catch. An error on
@@ -555,7 +534,6 @@ namespace ZeusOnlyMode
                     if (movement == null)
                         continue;
 
-                    polled++;
                     var buttons = (PlayerButtons)movement.Buttons.ButtonStates[0];
                     lastButtons.TryGetValue(player.Slot, out var previous);
                     lastButtons[player.Slot] = buttons;
@@ -563,9 +541,6 @@ namespace ZeusOnlyMode
                     var pressed = buttons & ~previous;
                     if (pressed == 0)
                         continue;
-
-                    if ((pressed & PlayerButtons.Attack2) != 0)
-                        rightClicksSeen++;
 
                     OnSuperZeusButtons(player, pressed);
                     OnZeusColorButtons(player, pressed);
@@ -577,19 +552,7 @@ namespace ZeusOnlyMode
                         $"[SuperZeus] Reading buttons for {SafeName(player)} failed: {ex}");
                 }
             }
-
-            // Heartbeat while Super Zeus is on: proves the poll is running and
-            // shows whether right-clicks are reaching it at all
-            if (superZeusEnabled && Server.CurrentTime >= nextHeartbeat)
-            {
-                nextHeartbeat = Server.CurrentTime + 15f;
-                Logger.LogInformation("[SuperZeus] Poll alive: {Polled} living players polled, {Clicks} right-clicks seen so far, {Balls} balls in flight",
-                    polled, rightClicksSeen, lightningBalls.Count);
-            }
         }
-
-        private int rightClicksSeen;
-        private float nextHeartbeat;
 
         private static string SafeName(CCSPlayerController? player)
         {
@@ -611,19 +574,12 @@ namespace ZeusOnlyMode
             if ((pressed & PlayerButtons.Attack2) == 0)
                 return;
 
-            // Every right-click that doesn't fire logs why
             if (player == null || !player.IsValid || !player.PawnIsAlive)
-            {
-                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is not alive", player?.PlayerName ?? "?");
                 return;
-            }
 
             var pawn = player.PlayerPawn.Value;
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
-            {
-                Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} has no pawn", player.PlayerName);
                 return;
-            }
 
             // Watching a camera: right-click with anything in hand comes back
             if (IsViewingCamera(player.Slot))
@@ -634,19 +590,10 @@ namespace ZeusOnlyMode
 
             var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
-            {
-                if (superZeusEnabled)
-                    Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is holding {Weapon}, not the Zeus",
-                        player.PlayerName, weapon != null && weapon.IsValid ? weapon.DesignerName : "nothing");
                 return;
-            }
 
-            // From here every right-click with the Zeus logs its outcome
             if (!superZeusEnabled)
-            {
-                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus is off", player.PlayerName);
                 return;
-            }
 
             if (FireModeOf(player) == FireMode.Camera)
             {
@@ -668,7 +615,6 @@ namespace ZeusOnlyMode
             var zeus = weapon.As<CWeaponTaser>();
             if (zeus.Clip1 <= 0)
             {
-                Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
                 PlaySound(pawn, "Weapon_Taser.ChargeNotReady");
                 return;
             }
@@ -679,14 +625,12 @@ namespace ZeusOnlyMode
                 float energy = BallEnergy(zeus.Index, now);
                 if (energy < 1f)
                 {
-                    Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: ball energy {Energy:0.00}/{Max} (refilling)", player.PlayerName, energy, HyperBallsPerCharge);
                     PlaySound(pawn, "Weapon_Taser.ChargeNotReady");
                     return;
                 }
 
                 ballEnergy[zeus.Index] = (energy - 1f, now);
                 nextBallTime[player.Slot] = now + HyperBallGap;
-                Logger.LogInformation("[SuperZeus] {Name} fired a Hyper Zeus ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, HyperBallsPerCharge);
                 FireLightningBall(player, pawn, zeus, HyperBallDamage, HyperBallSize, reflect: false);
                 return;
             }
@@ -695,12 +639,10 @@ namespace ZeusOnlyMode
             ConsumeZeusCharge(zeus);
             if (mode == FireMode.Grapple)
             {
-                Logger.LogInformation("[SuperZeus] {Name} fired a grapple", player.PlayerName);
                 FireGrapple(player, pawn, zeus);
                 return;
             }
 
-            Logger.LogInformation("[SuperZeus] {Name} fired a {Mode} ball", player.PlayerName, mode);
             FireLightningBall(player, pawn, zeus, BallDamage, 1f, reflect: mode == FireMode.Reflect);
         }
 
@@ -1006,10 +948,7 @@ namespace ZeusOnlyMode
         {
             var projectile = ball.Projectile.Value;
             if (projectile == null || !projectile.IsValid || projectile.AbsOrigin == null)
-            {
-                LogBallEnd(ball, ball.LastPosition, "lost its carrier (deleted by something outside the plugin)");
                 return false;
-            }
 
             var pos = ToVec3(projectile.AbsOrigin);
 
@@ -1018,12 +957,10 @@ namespace ZeusOnlyMode
             {
                 if (IsEnemy(hit, ball))
                 {
-                    LogBallEnd(ball, pos, $"hit enemy {hit.PlayerName}");
                     StrikeVictim(hit, ball);
                 }
                 else
                 {
-                    LogBallEnd(ball, pos, $"dissipated on teammate {hit.PlayerName}");
                     WallBurst(pos); // teammates are never hurt; the ball just dissipates
                 }
                 return false;
@@ -1034,7 +971,6 @@ namespace ZeusOnlyMode
                 ball.SeenBounces = projectile.Bounces;
                 if (!ball.Reflect || ball.Reflections >= MaxReflections)
                 {
-                    LogBallEnd(ball, pos, ball.Reflections > 0 ? $"hit a wall after bouncing {ball.Reflections}x" : "hit a wall");
                     WallBurst(pos);
                     return false;
                 }
@@ -1044,7 +980,6 @@ namespace ZeusOnlyMode
 
             if (Server.CurrentTime >= ball.ExpireTime)
             {
-                LogBallEnd(ball, pos, "timed out");
                 SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
                 SpawnParticle(FxImpactArcs, pos, Vector3.Zero, 1f);
                 return false;
@@ -1071,35 +1006,6 @@ namespace ZeusOnlyMode
         {
             teammatesAreEnemiesCvar ??= ConVar.Find("mp_teammates_are_enemies");
             return teammatesAreEnemiesCvar?.StringValue is "1" or "true";
-        }
-
-        // One console line per ball saying how it ended and where the nearest
-        // player was, so a ball that "didn't hit" can be diagnosed from the log
-        private void LogBallEnd(LightningBall ball, Vector3 pos, string outcome)
-        {
-            string nearest = "no other players";
-            float best = float.MaxValue;
-            foreach (var player in Utilities.GetPlayers())
-            {
-                if (player == null || !player.IsValid || player.Slot == ball.OwnerSlot)
-                    continue;
-
-                var origin = player.PlayerPawn.Value?.AbsOrigin;
-                if (origin == null)
-                    continue;
-
-                var feet = ToVec3(origin);
-                float horizontal = new Vector2(pos.X - feet.X, pos.Y - feet.Y).Length();
-                if (horizontal < best)
-                {
-                    best = horizontal;
-                    nearest = $"nearest {player.PlayerName} (team {player.TeamNum}, alive {player.PawnIsAlive}) "
-                            + $"{horizontal:0} units away, {pos.Z - feet.Z:0} above their feet";
-                }
-            }
-
-            Logger.LogInformation("[SuperZeus] Ball from slot {Slot} (team {Team}) {Outcome}; {Nearest}",
-                ball.OwnerSlot, ball.OwnerTeam, outcome, nearest);
         }
 
         // Any living player (other than the shooter) whose body the ball's
@@ -1261,18 +1167,13 @@ namespace ZeusOnlyMode
         {
             var pawn = pawnHandle.Value;
             if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
-            {
-                Logger.LogInformation("[SuperZeus] {Name} was already dead or gone before the mid-flight kill", name);
                 return;
-            }
 
-            float speed = ToVec3(pawn.AbsVelocity).Length();
             var chest = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, 40f);
             if (shooterPawn != null && !shooterPawn.IsValid)
                 shooterPawn = null;
 
             ApplyBallDamage(pawn, name, shooterPawn, launch, chest, Math.Min(before, pawn.Health), ball.Damage);
-            Logger.LogInformation("[SuperZeus] {Name} was moving at {Speed:0} units/s when the killing damage landed", name, speed);
 
             if (pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
                 AddTimer(DisintegrateDelay, () => DisintegrateBody(pawnHandle, name, ball.Color), TimerFlags.STOP_ON_MAPCHANGE);
@@ -1289,10 +1190,7 @@ namespace ZeusOnlyMode
         {
             var pawn = pawnHandle.Value;
             if (pawn == null || !pawn.IsValid)
-            {
-                Logger.LogInformation("[SuperZeus] {Name}: body gone before it could disintegrate", name);
                 return;
-            }
 
             try { DisintegrationShow(pawn, color); }
             catch (Exception ex) { Logger.LogError("[SuperZeus] {Name}: disintegration effects failed: {Message}", name, ex.Message); }
@@ -1345,7 +1243,6 @@ namespace ZeusOnlyMode
                     if (t >= 1f)
                     {
                         SetPawnRender(pawn, RenderMode_t.kRenderNone, Color.FromArgb(0, CharredColor));
-                        Logger.LogInformation("[SuperZeus] {Name}: body burned away", fade.Name);
                         bodyFades.RemoveAt(i);
                     }
                     else
@@ -1480,16 +1377,12 @@ namespace ZeusOnlyMode
             int scoreBefore = shooter?.Score ?? 0;
 
             pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
-            ballForceApplied = false;
             try { DamagePawn(pawn, shooterPawn, chest, before, damage); }
             finally { pendingBallForces.Remove(pawn.Index); }
 
             bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
             if (killed)
                 AwardBallKillScore(shooter, scoreBefore, name);
-            Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
-                name, damage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
-                ballForceApplied ? "applied" : "not applied");
 
             if (killed)
             {
@@ -1511,14 +1404,10 @@ namespace ZeusOnlyMode
             try
             {
                 if (shooter.Score != scoreBefore)
-                {
-                    Logger.LogInformation("[SuperZeus] {Shooter} already got {Points} points for killing {Victim}", shooter.PlayerName, shooter.Score - scoreBefore, victim);
                     return;
-                }
 
                 shooter.Score += BallKillScore;
                 Utilities.SetStateChanged(shooter, "CCSPlayerController", "m_iScore");
-                Logger.LogInformation("[SuperZeus] {Shooter} +{Points} score for killing {Victim} (now {Score})", shooter.PlayerName, BallKillScore, victim, shooter.Score);
             }
             catch (Exception ex)
             {
@@ -1530,7 +1419,6 @@ namespace ZeusOnlyMode
         private sealed record PendingBallHit(Vector3 Launch, Vector3 At, CCSPlayerPawn? Attacker, CBasePlayerWeapon? Zeus);
 
         private readonly Dictionary<uint, PendingBallHit> pendingBallForces = new();
-        private bool ballForceApplied;
 
         // Stamps the ball's own damage as it's processed:
         //  - attacker = the shooter and weapon = their Zeus, so the game credits
@@ -1573,7 +1461,6 @@ namespace ZeusOnlyMode
             info.DamageDirection.X = direction.X;
             info.DamageDirection.Y = direction.Y;
             info.DamageDirection.Z = direction.Z;
-            ballForceApplied = true;
             return HookResult.Continue;
         }
 
@@ -1739,9 +1626,6 @@ namespace ZeusOnlyMode
             var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
             SpawnParticle(FxImpactArcs, pos, Vector3.Zero, 1f);
             PlaySound(flash, "DoSpark");
-
-            Logger.LogInformation("[SuperZeus] Ball from slot {Slot} bounced ({Count}/{Max}) off a surface facing ({NX:0.00}, {NY:0.00}, {NZ:0.00})",
-                ball.OwnerSlot, ball.Reflections, MaxReflections, normal.X, normal.Y, normal.Z);
         }
 
         private void WallBurst(Vector3 pos)

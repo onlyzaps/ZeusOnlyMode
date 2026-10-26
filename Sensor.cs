@@ -98,7 +98,6 @@ namespace ZeusOnlyMode
 
             PlaySound(pawn, "Weapon_Taser.Single");
             KickZeus(zeus);
-            Logger.LogInformation("[SuperZeus] {Name} shot a probe", player.PlayerName);
         }
 
         private void UpdateSensors()
@@ -225,7 +224,6 @@ namespace ZeusOnlyMode
 
             var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
             PlaySound(flash, "DoSpark");
-            Logger.LogInformation("[SuperZeus] {Name}'s probe planted", sensor.OwnerName);
         }
 
         private static void AddSensorPart(Sensor sensor, Vector3 a, Vector3 b, Color color, float width, float endWidth)
@@ -250,9 +248,6 @@ namespace ZeusOnlyMode
             string where = string.IsNullOrWhiteSpace(place) ? "" : $" at {ChatColors.Yellow}{place}{ChatColors.Default}";
             foreach (var player in team)
                 player.PrintToChat($" {ChatColors.Red}PROBE ALERT{ChatColors.Default}: enemy{where} near {sensor.OwnerName}'s probe!");
-
-            Logger.LogInformation("[SuperZeus] {Name}'s probe spotted {Enemy}{Where}", sensor.OwnerName, intruder.PlayerName,
-                string.IsNullOrWhiteSpace(place) ? "" : $" at {place}");
         }
 
         private static void DestroySensor(Sensor sensor)

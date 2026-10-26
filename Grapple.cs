@@ -76,7 +76,6 @@ namespace ZeusOnlyMode
                 return false;
             }
 
-            Logger.LogInformation("[SuperZeus] Blocked {Damage:0} fall damage to {Name} after a grapple", info.Damage, controller.PlayerName);
             info.Damage = 0;
             return true;
         }
@@ -173,8 +172,6 @@ namespace ZeusOnlyMode
                     var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
                     PlaySound(flash, "DoSpark");
                     StartPull(grapple, pawn, pos, now);
-                    Logger.LogInformation("[SuperZeus] {Name}'s grapple caught a surface {Distance:0} units away",
-                        grapple.OwnerName, Vector3.Distance(ToVec3(pawn.AbsOrigin), pos));
                 }
                 else if (now >= grapple.ExpireTime)
                 {
@@ -201,10 +198,7 @@ namespace ZeusOnlyMode
             }
 
             if (now - grapple.PullStart >= GrappleMaxPullTime)
-            {
-                Logger.LogInformation("[SuperZeus] {Name}'s grapple let go: took too long", grapple.OwnerName);
                 return false;
-            }
 
             float dt = now - grapple.LastUpdate;
             if (now - grapple.PullStart > GrappleStuckGrace && dt > 0f)
@@ -213,7 +207,6 @@ namespace ZeusOnlyMode
                 grapple.StuckTicks = moved < GrapplePullSpeed * dt * GrappleStuckFraction ? grapple.StuckTicks + 1 : 0;
                 if (grapple.StuckTicks >= GrappleStuckTicks)
                 {
-                    Logger.LogInformation("[SuperZeus] {Name}'s grapple let go: stopped moving {Distance:0} units short", grapple.OwnerName, distance);
                     pawn.Teleport(null, null, (Vector3?)Vector3.Zero);
                     return false;
                 }
@@ -260,7 +253,6 @@ namespace ZeusOnlyMode
 
             var burst = ImpactBurst(chest);
             PlaySound(burst, "Weapon_Taser.Hit");
-            Logger.LogInformation("[SuperZeus] {Name}'s grapple struck {Victim}", grapple.OwnerName, victim.PlayerName);
             return chest;
         }
 

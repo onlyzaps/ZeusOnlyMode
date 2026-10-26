@@ -214,7 +214,6 @@ namespace ZeusOnlyMode
 
             PlaySound(pawn, "Weapon_Taser.Single");
             KickZeus(zeus);
-            Logger.LogInformation("[SuperZeus] {Name} shot a camera", player.PlayerName);
         }
 
         private void UpdateCameras()
@@ -399,8 +398,6 @@ namespace ZeusOnlyMode
             var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
             PlaySound(flash, "DoSpark");
             player.PrintToCenter("Camera placed - right-click to watch it");
-            Logger.LogInformation("[SuperZeus] {Name}'s camera stuck to a {Surface}", player.PlayerName,
-                camera.OnWall ? "wall" : normal.Z > 0f ? "floor" : "ceiling");
         }
 
         // Lays out the webcam along where the camera looks, and puts the view

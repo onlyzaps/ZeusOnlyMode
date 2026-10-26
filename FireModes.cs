@@ -93,7 +93,6 @@ namespace ZeusOnlyMode
             fireModes[player.SteamID] = next.Mode;
             SaveFireModes();
             ShowModePanel(player, next);
-            Logger.LogInformation("[SuperZeus] {Name} switched fire mode to {Mode}", player.PlayerName, next.Name);
         }
 
         // Just the mode switched to, in the player's color
