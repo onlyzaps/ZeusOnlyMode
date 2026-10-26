@@ -194,15 +194,20 @@ namespace ZeusOnlyMode
         // --- Sound volume -------------------------------------------------------
         //
         // CS2 ignores the volume EmitSound is given; a sound event's level is one
-        // of its parameters ("public.volume"), set afterwards with a
-        // GE_SosSetSoundEventParams message naming the sound by the guid
-        // EmitSound returns. packed_params holds the parameter name's
-        // MurmurHash2 (lowercase, seed 0x31415926), a type tag (0x08 = float),
-        // a 16-bit length and the value, all little-endian.
+        // of its parameters ("public.volume"). Parameters travel in packed_params:
+        // per parameter, the name's MurmurHash2 (lowercase, seed 0x31415926), a
+        // type tag (0x08 = float), a 16-bit length and the value, little-endian.
+        //
+        // The volume is written into the start message itself (GE_SosStartSoundEvent)
+        // so the sound begins at that level, and set again afterwards with
+        // GE_SosSetSoundEventParams naming the sound by its guid.
 
+        private const int SosStartSoundEventId = 208;
         private const int SosSetSoundEventParamsId = 210;
-        private static readonly byte[] VolumeParamHeader = { 0xE9, 0x54, 0x60, 0xBD, 0x08, 0x04, 0x00 };
-        private bool loggedVolumeSend;
+        private const uint VolumeParamHash = 0xBD6054E9;   // "public.volume"
+        private string? emittingSound;                       // set while PlaySound emits
+        private readonly Dictionary<uint, string> recentSounds = new();
+        private int soundLogsLeft;
 
         private void PlaySound(CBaseEntity? source, string sound)
         {
@@ -211,13 +216,87 @@ namespace ZeusOnlyMode
 
             var recipients = new RecipientFilter();
             recipients.AddAllPlayers();
-            uint guid = source.EmitSound(sound, recipients, SoundVolume);
+            uint guid;
+            emittingSound = sound;
+            try { guid = source.EmitSound(sound, recipients, SoundVolume); }
+            finally { emittingSound = null; }
             if (guid == 0 || SoundVolume >= 1f)
                 return;
 
+            // In case the start message goes out after EmitSound returns
+            recentSounds[guid] = sound;
+            Server.NextFrame(() =>
+            {
+                recentSounds.Remove(guid);
+                SendSoundVolume(guid, recipients, sound);
+            });
             SendSoundVolume(guid, recipients, sound);
-            // Again next frame, in case the first one beat the sound's start
-            Server.NextFrame(() => SendSoundVolume(guid, recipients, sound));
+        }
+
+        private HookResult OnSosStartSoundEvent(UserMessage message)
+        {
+            if (SoundVolume >= 1f)
+                return HookResult.Continue;
+
+            try
+            {
+                uint guid = message.ReadUInt("soundevent_guid");
+                string? sound = emittingSound;
+                if (sound == null && !recentSounds.TryGetValue(guid, out sound))
+                    return HookResult.Continue;
+
+                byte[] before = message.ReadBytes("packed_params");
+                byte[] after = WithVolume(before, SoundVolume);
+                message.SetBytes("packed_params", after);
+
+                if (soundLogsLeft > 0)
+                {
+                    soundLogsLeft--;
+                    Logger.LogInformation("[SuperZeus] {Sound} start (guid {Guid}, {When}): params {Before} -> {After}",
+                        sound, guid, emittingSound != null ? "during EmitSound" : "after EmitSound",
+                        before.Length == 0 ? "(none)" : Convert.ToHexString(before), Convert.ToHexString(after));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] Setting a sound's start volume failed: {Message}", ex.Message);
+            }
+            return HookResult.Continue;
+        }
+
+        // The packed parameters with any volume entry replaced by ours
+        private static byte[] WithVolume(byte[] packed, float volume)
+        {
+            var result = new List<byte>(packed.Length + 11);
+            int i = 0;
+            while (i + 7 <= packed.Length)
+            {
+                uint hash = BitConverter.ToUInt32(packed, i);
+                int size = 7 + BitConverter.ToUInt16(packed, i + 5);
+                if (i + size > packed.Length)
+                    break;
+                if (hash != VolumeParamHash)
+                    result.AddRange(packed.AsSpan(i, size).ToArray());
+                i += size;
+            }
+            if (i != packed.Length)   // not the layout we expect: keep it whole
+            {
+                result.Clear();
+                result.AddRange(packed);
+            }
+
+            result.AddRange(VolumeParam(volume));
+            return result.ToArray();
+        }
+
+        private static byte[] VolumeParam(float volume)
+        {
+            var bytes = new byte[11];
+            BitConverter.GetBytes(VolumeParamHash).CopyTo(bytes, 0);
+            bytes[4] = 0x08;   // float
+            bytes[5] = 4;      // length 4
+            BitConverter.GetBytes(volume).CopyTo(bytes, 7);
+            return bytes;
         }
 
         private void SendSoundVolume(uint guid, RecipientFilter recipients, string sound)
@@ -226,14 +305,8 @@ namespace ZeusOnlyMode
             {
                 using var message = UserMessage.FromId(SosSetSoundEventParamsId);
                 message.SetUInt("soundevent_guid", guid);
-                message.SetBytes("packed_params", VolumeParamHeader.Concat(BitConverter.GetBytes(SoundVolume)).ToArray());
+                message.SetBytes("packed_params", VolumeParam(SoundVolume));
                 message.Send(recipients);
-
-                if (!loggedVolumeSend)
-                {
-                    loggedVolumeSend = true;
-                    Logger.LogInformation("[SuperZeus] Set {Sound} (guid {Guid}) to volume {Volume}", sound, guid, SoundVolume);
-                }
             }
             catch (Exception ex)
             {
@@ -245,6 +318,8 @@ namespace ZeusOnlyMode
         {
             LoadSettings();
             LoadSuperZeusState();
+            soundLogsLeft = 6;
+            HookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
 
             // Both spellings work from console/RCON. CS# also forwards "!superzeus"
             // in chat to css_superzeus, so the chat hook below and this command
@@ -298,6 +373,7 @@ namespace ZeusOnlyMode
 
         private void UnloadSuperZeus()
         {
+            UnhookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
             ClearLightningBalls();
         }
 
