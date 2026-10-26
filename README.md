@@ -34,7 +34,8 @@ Fire modes (right-click with the Zeus):
   itself hits an enemy they are killed, and you are pulled to where they died. The pull lets go if you stop moving, so it never pins
   you to a wall or drags you through one. You take no fall damage during the pull or for 3 seconds after it lets go.
 - Camera: shoots a little webcam onto a wall (one per life; a shot that hits nothing can be taken again). After that, right-click
-  switches your view to the camera and back; it starts looking out from the wall 45 degrees down and pans with the mouse. Its light
+  switches your view to the camera and back; it starts looking back the way it was shot and pans with W/A/S/D (you stand still while
+  watching, framed by a green border with a flashing REC). Its light
   turns red while you watch, and it goes away when you die.
 
 A center panel names the mode each time Inspect switches it. Each player's last mode is remembered forever in

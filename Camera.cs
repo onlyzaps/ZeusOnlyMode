@@ -13,18 +13,21 @@ namespace ZeusOnlyMode
         // Camera fire mode: right-click shoots a little webcam onto a wall
         // (one per life; a shot that hits nothing is refunded). After that,
         // right-click switches the player's view to the camera and back. The
-        // view starts looking out from the wall, 45 degrees down, and pans
-        // with the mouse. The view is an invisible entity the player's camera
-        // services are pointed at (the way third-person plugins do it); the
-        // webcam itself is drawn from beams, its lens following the view and
-        // its light turning red while someone is watching. The camera goes
-        // away when its owner dies.
+        // view starts looking back along the line the camera was shot from,
+        // and pans with W/A/S/D (the game doesn't pass mouse movement through
+        // while the view is on another entity), with the player held still
+        // meanwhile. The view is an invisible entity the player's camera
+        // services are pointed at (the way third-person plugins do it), framed
+        // by a green border with a flashing REC title. The webcam itself is
+        // drawn from beams, its head turning with the view and its light red
+        // while someone is watching. The camera goes away when its owner dies.
         // ------------------------------------------------------------------
 
         private const float CameraShotLifetime = 1.5f;   // about 2800 units of reach
-        private const float CameraDefaultPitch = 45f;    // looking down
-        private const float CameraFloorPitch = -20f;     // a floor camera looks up a little
         private const float CameraMaxPanFromWall = 80f;  // a wall camera never looks into its own wall
+        private const float CameraPanYawSpeed = 90f;     // degrees/s with A / D
+        private const float CameraPanPitchSpeed = 60f;   // degrees/s with W / S
+        private const float CameraBorderDistance = 10f;  // the screen border, in front of the view
         private const float CameraArmLength = 8f;        // the head's pivot, out from the wall
         private const float CameraViewAhead = 16f;       // the view sits just past the lens
         private const float CameraBlinkPeriod = 1f;      // the light blinks while nobody watches
@@ -118,7 +121,6 @@ namespace ZeusOnlyMode
         {
             public required int OwnerSlot;
             public required ZeusColorOption? Color;
-            public required float ShooterYaw;
             public CHandle<CDecoyProjectile>? Tip;
             public Vector3 Velocity;
             public Vector3 TipPosition;
@@ -136,7 +138,10 @@ namespace ZeusOnlyMode
             public bool LightLit;
 
             public bool Viewing;
-            public Vector3 EyeAtToggle;
+            public float LastPan;
+            public bool RecDot;
+            public float NextRec;
+            public readonly List<CHandle<CBeam>> Border = new();   // the watcher's screen border
         }
 
         private readonly Dictionary<int, WallCamera> wallCameras = new();
@@ -202,7 +207,6 @@ namespace ZeusOnlyMode
             {
                 OwnerSlot = player.Slot,
                 Color = GetZeusColor(player),
-                ShooterYaw = pawn.EyeAngles.Y,
                 Tip = HandleOf(tip),
                 Velocity = velocity,
                 TipPosition = spawnPos,
@@ -267,19 +271,27 @@ namespace ZeusOnlyMode
 
             if (camera.Viewing)
             {
-                // The camera looks wherever the player looks. Their view was
-                // snapped to the camera when they started watching, and while
-                // watching their view angles follow the camera, so adding the
-                // change on top each tick fed back into a runaway spin; taking
-                // the angles as they are is stable either way.
-                float pitch = Math.Clamp(pawn.EyeAngles.X, -89f, 89f);
-                float yaw = pawn.EyeAngles.Y;
-                if (camera.OnWall)
-                    yaw = camera.OutwardYaw + Math.Clamp(WrapDegrees(yaw - camera.OutwardYaw), -CameraMaxPanFromWall, CameraMaxPanFromWall);
+                float now = Server.CurrentTime;
+                float dt = Math.Clamp(now - camera.LastPan, 0f, 0.1f);
+                camera.LastPan = now;
 
-                camera.Angles = new Vector3(pitch, yaw, 0f);
-                if (Vector3.DistanceSquared(camera.Angles, camera.AimedAngles) > 0.01f)
+                // W / S tilt up / down, A / D turn left / right
+                var held = pawn.MovementServices != null ? (PlayerButtons)pawn.MovementServices.Buttons.ButtonStates[0] : 0;
+                float turn = ((held & PlayerButtons.Moveleft) != 0 ? 1f : 0f) - ((held & PlayerButtons.Moveright) != 0 ? 1f : 0f);
+                float tilt = ((held & PlayerButtons.Back) != 0 ? 1f : 0f) - ((held & PlayerButtons.Forward) != 0 ? 1f : 0f);
+                if (turn != 0f || tilt != 0f)
+                {
+                    camera.Angles = ClampCameraAngles(camera, camera.Angles + new Vector3(tilt * CameraPanPitchSpeed * dt, turn * CameraPanYawSpeed * dt, 0f));
                     AimCamera(camera, mount: false);
+                }
+
+                bool dot = now % 1f < 0.5f;
+                if (dot != camera.RecDot || now >= camera.NextRec)
+                {
+                    camera.RecDot = dot;
+                    camera.NextRec = now + 0.5f;
+                    player.PrintToCenterHtml($"<font color='{(dot ? "#FF2020" : "#3A0000")}'>&#9679;</font> <font color='#FFFFFF'><b>REC</b></font>", 1);
+                }
             }
 
             bool lit = camera.Viewing || Server.CurrentTime % CameraBlinkPeriod < CameraBlinkPeriod * 0.5f;
@@ -289,6 +301,16 @@ namespace ZeusOnlyMode
                 SetCameraLight(camera);
             }
             return true;
+        }
+
+        // Pitch within straight up / down; a wall camera never looks into its wall
+        private static Vector3 ClampCameraAngles(WallCamera camera, Vector3 angles)
+        {
+            float pitch = Math.Clamp(angles.X, -89f, 89f);
+            float yaw = angles.Y;
+            if (camera.OnWall)
+                yaw = camera.OutwardYaw + Math.Clamp(WrapDegrees(yaw - camera.OutwardYaw), -CameraMaxPanFromWall, CameraMaxPanFromWall);
+            return new Vector3(pitch, WrapDegrees(yaw), 0f);
         }
 
         private static float WrapDegrees(float angle)
@@ -309,12 +331,12 @@ namespace ZeusOnlyMode
             camera.OnWall = MathF.Abs(normal.Z) < 0.7f;
             camera.OutwardYaw = MathF.Atan2(normal.Y, normal.X) * 180f / MathF.PI;
 
-            // Out from a wall, 45 degrees down; on a floor or ceiling, back
-            // toward where it was shot from
-            if (camera.OnWall)
-                camera.Angles = new Vector3(CameraDefaultPitch, camera.OutwardYaw, 0f);
-            else
-                camera.Angles = new Vector3(normal.Z > 0f ? CameraFloorPitch : CameraDefaultPitch, camera.ShooterYaw + 180f, 0f);
+            // Looking back along the line it was shot from
+            var back = -Vector3.Normalize(camera.Velocity);
+            camera.Angles = ClampCameraAngles(camera, new Vector3(
+                -MathF.Asin(Math.Clamp(back.Z, -1f, 1f)) * 180f / MathF.PI,
+                MathF.Atan2(back.Y, back.X) * 180f / MathF.PI,
+                0f));
 
             var view = Utilities.CreateEntityByName<CDynamicProp>("prop_dynamic");
             if (view != null)
@@ -378,9 +400,66 @@ namespace ZeusOnlyMode
             }
 
             camera.AimedAngles = camera.Angles;
+            var eye = pivot + look * CameraViewAhead;
             var view = camera.View?.Value;
             if (view != null && view.IsValid)
-                view.Teleport(pivot + look * CameraViewAhead, camera.Angles, Vector3.Zero);
+                view.Teleport(eye, camera.Angles, Vector3.Zero);
+
+            if (camera.Border.Count > 0)
+                PlaceCameraBorder(camera, eye, look, right, up);
+        }
+
+        // A translucent green frame just inside the edges of the watcher's
+        // screen: a soft wide glow under a bright thin line on each side. The
+        // sides sit at a 4:3 width, so they're on screen at any aspect.
+        private static readonly Color CameraBorderGlow = Color.FromArgb(255, 0, 90, 30);
+        private static readonly Color CameraBorderLine = Color.FromArgb(255, 40, 255, 90);
+
+        private void CreateCameraBorder(WallCamera camera)
+        {
+            for (int layer = 0; layer < 2; layer++)
+            {
+                for (int side = 0; side < 4; side++)
+                {
+                    var beam = layer == 0
+                        ? CreateBeam(camera.Anchor, camera.Anchor, CameraBorderGlow, 1.2f, 1.2f)
+                        : CreateBeam(camera.Anchor, camera.Anchor, CameraBorderLine, 0.2f, 0.2f);
+                    if (beam != null) camera.Border.Add(HandleOf(beam));
+                }
+            }
+        }
+
+        private static void PlaceCameraBorder(WallCamera camera, Vector3 eye, Vector3 look, Vector3 right, Vector3 up)
+        {
+            var center = eye + look * CameraBorderDistance;
+            float halfWide = CameraBorderDistance * 1.0f * 0.93f;    // 90 degree view at 4:3
+            float halfTall = CameraBorderDistance * 0.75f * 0.93f;
+            var corners = new[]
+            {
+                center - right * halfWide + up * halfTall,
+                center + right * halfWide + up * halfTall,
+                center + right * halfWide - up * halfTall,
+                center - right * halfWide - up * halfTall,
+            };
+            for (int i = 0; i < camera.Border.Count; i++)
+                MoveBallBeam(camera.Border[i], corners[i % 4], corners[(i + 1) % 4]);
+        }
+
+        private static void RemoveCameraBorder(WallCamera camera)
+        {
+            foreach (var beam in camera.Border) RemoveEntity(beam);
+            camera.Border.Clear();
+        }
+
+        // Watching holds the player still (W/A/S/D pan the camera instead)
+        private static void FreezePlayer(CCSPlayerPawn pawn, bool frozen)
+        {
+            var type = frozen ? MoveType_t.MOVETYPE_OBSOLETE : MoveType_t.MOVETYPE_WALK;
+            pawn.MoveType = type;
+            pawn.ActualMoveType = type;
+            Utilities.SetStateChanged(pawn, "CBaseEntity", "m_MoveType");
+            if (frozen)
+                pawn.Teleport(null, null, (Vector3?)Vector3.Zero);
         }
 
         private static void SetCameraLight(WallCamera camera)
@@ -403,33 +482,26 @@ namespace ZeusOnlyMode
             services.ViewEntity.Raw = view.EntityHandle.Raw;
             Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pCameraServices");
 
-            // Remember where they were looking, then turn them to the camera's
-            // angle so the view picks up exactly where the camera points
             camera.Viewing = true;
-            camera.EyeAtToggle = new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0f);
-            pawn.Teleport(null, camera.Angles, null);
+            camera.LastPan = Server.CurrentTime;
+            camera.NextRec = 0f;
+            FreezePlayer(pawn, true);
+            CreateCameraBorder(camera);
             AimCamera(camera);
-
-            var pawnHandle = HandleOf(pawn);
-            Server.NextFrame(() =>
-            {
-                if (pawnHandle.Value is { } p && p.IsValid)
-                    Logger.LogInformation("[SuperZeus] {Name} watching: view ({VP:0}, {VY:0}), camera ({CP:0}, {CY:0})",
-                        player.PlayerName, p.EyeAngles.X, p.EyeAngles.Y, camera.Angles.X, camera.Angles.Y);
-            });
-            player.PrintToCenter("Watching your camera - move the mouse to pan, right-click to return");
+            player.PrintToChat($" {ChatColors.Green}Camera{ChatColors.Default}: W/A/S/D to look around, right-click to come back.");
         }
 
         // Back to the player's own eyes (the camera keeps where it was panned to)
         private void StopCameraView(WallCamera camera)
         {
             camera.Viewing = false;
+            RemoveCameraBorder(camera);
             var pawn = Utilities.GetPlayerFromSlot(camera.OwnerSlot)?.PlayerPawn.Value;
             if (pawn != null && pawn.IsValid && pawn.CameraServices is { } services)
             {
                 services.ViewEntity.Raw = uint.MaxValue;
                 Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pCameraServices");
-                pawn.Teleport(null, camera.EyeAtToggle, null);   // facing where they were before
+                FreezePlayer(pawn, false);
             }
             if (camera.Placed)
                 AimCamera(camera);

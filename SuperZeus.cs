@@ -1694,10 +1694,11 @@ namespace ZeusOnlyMode
             }
         }
 
-        // The surface a carrier just bounced off faces along its change in velocity
+        // The surface a carrier just bounced off faces along its change in
+        // velocity (out of the surface: the bounce pushed it that way)
         private static Vector3 SurfaceNormal(Vector3 incoming, CDecoyProjectile projectile)
         {
-            var normal = incoming - ToVec3(projectile.AbsVelocity);
+            var normal = ToVec3(projectile.AbsVelocity) - incoming;
             return normal.LengthSquared() < 1f ? -Vector3.Normalize(incoming) : Vector3.Normalize(normal);
         }
 
