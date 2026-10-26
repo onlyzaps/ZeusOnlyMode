@@ -22,7 +22,7 @@ dissipates on them like it hit a wall. It explodes on walls and fizzles out afte
 Super Zeus works with or without Zeus Only Mode.
 
 Hyper Zeus (hyperzeus / css_hyperzeus in console, !hyperzeus / /hyperzeus in chat, same admin flag, 1 or 0 to force it) is the rapid-fire version:
-balls fire three times as fast as the normal zap, from a three-ball energy pool that refills over mp_taser_recharge_time, and a normal zap empties the pool.
+balls hit for 10 damage instead of 34 and fire three times as fast as the normal zap, from a three-ball energy pool that refills over mp_taser_recharge_time, and a normal zap empties the pool.
 It works on its own or alongside Super Zeus, and is also remembered across map changes and reloads.
 
 Zeus Colors

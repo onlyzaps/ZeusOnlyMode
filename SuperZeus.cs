@@ -50,8 +50,10 @@ namespace ZeusOnlyMode
         private const float RagdollForceScale = 100f;
         private const float DroppedGunForceScale = 50f;
 
-        // Damage per lightning ball hit (a little over a third of full health)
+        // Damage per lightning ball hit (a little over a third of full health);
+        // Hyper Zeus fires much faster, so each of its balls hits for less
         private const int BallDamage = 34;
+        private const int HyperBallDamage = 10;
 
         // All effects below exist in CS2's pak01 and only rely on control point 0,
         // so they render correctly from a plain info_particle_system.
@@ -129,6 +131,7 @@ namespace ZeusOnlyMode
             public required Vector3 Velocity;
             public required Vector3 LastPosition;
             public required float ExpireTime;
+            public required int Damage;
             public int Age;
         }
 
@@ -625,14 +628,14 @@ namespace ZeusOnlyMode
                 ballEnergy[zeus.Index] = (energy - 1f, now);
                 nextBallTime[player.Slot] = now + HyperBallGap;
                 Logger.LogInformation("[SuperZeus] {Name} fired a Hyper Zeus ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, HyperBallsPerCharge);
-                FireLightningBall(player, pawn, zeus);
+                FireLightningBall(player, pawn, zeus, HyperBallDamage);
                 return;
             }
 
             Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
             ConsumeZeusCharge(zeus);
-            FireLightningBall(player, pawn, zeus);
+            FireLightningBall(player, pawn, zeus, BallDamage);
         }
 
         // Hyper Zeus balls fire three times as fast as the normal zap: each
@@ -722,7 +725,7 @@ namespace ZeusOnlyMode
             }
         }
 
-        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus)
+        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus, int damage)
         {
             var eye = ToVec3(pawn.AbsOrigin!) + new Vector3(0, 0, pawn.ViewOffset.Z);
             var angles = new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0);
@@ -762,7 +765,8 @@ namespace ZeusOnlyMode
                 Color = GetZeusColor(player),
                 Velocity = velocity,
                 LastPosition = spawnPos,
-                ExpireTime = Server.CurrentTime + BallLifetime
+                ExpireTime = Server.CurrentTime + BallLifetime,
+                Damage = damage
             };
 
             // A small BFG-style ball in the player's color (stock blue on
@@ -1063,7 +1067,7 @@ namespace ZeusOnlyMode
             var launch = dir * RagdollLaunchSpeed + new Vector3(0f, 0f, RagdollLaunchSpeed * 0.3f);
 
             int before = pawn.Health;
-            bool lethal = before <= BallDamage;
+            bool lethal = before <= ball.Damage;
 
             if (lethal)
             {
@@ -1080,7 +1084,7 @@ namespace ZeusOnlyMode
             }
             else
             {
-                ApplyBallDamage(pawn, victim.PlayerName, shooterPawn, launch, chest, before);
+                ApplyBallDamage(pawn, victim.PlayerName, shooterPawn, launch, chest, before, ball.Damage);
 
                 if (pawn.LifeState == (byte)LifeState_t.LIFE_ALIVE)
                 {
@@ -1148,7 +1152,7 @@ namespace ZeusOnlyMode
             if (shooterPawn != null && !shooterPawn.IsValid)
                 shooterPawn = null;
 
-            ApplyBallDamage(pawn, name, shooterPawn, launch, chest, Math.Min(before, pawn.Health));
+            ApplyBallDamage(pawn, name, shooterPawn, launch, chest, Math.Min(before, pawn.Health), ball.Damage);
             Logger.LogInformation("[SuperZeus] {Name} was moving at {Speed:0} units/s when the killing damage landed", name, speed);
 
             if (pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
@@ -1351,21 +1355,21 @@ namespace ZeusOnlyMode
         private const int DisintegrateCrackleArcs = 12;
 
         // 34 damage with the shooter's credit and the launch on the damage
-        private void ApplyBallDamage(CCSPlayerPawn pawn, string name, CCSPlayerPawn? shooterPawn, Vector3 launch, Vector3 chest, int before)
+        private void ApplyBallDamage(CCSPlayerPawn pawn, string name, CCSPlayerPawn? shooterPawn, Vector3 launch, Vector3 chest, int before, int damage)
         {
             var shooter = shooterPawn != null && shooterPawn.IsValid ? shooterPawn.Controller.Value?.As<CCSPlayerController>() : null;
             int scoreBefore = shooter?.Score ?? 0;
 
             pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
             ballForceApplied = false;
-            try { DamagePawn(pawn, shooterPawn, chest, before); }
+            try { DamagePawn(pawn, shooterPawn, chest, before, damage); }
             finally { pendingBallForces.Remove(pawn.Index); }
 
             bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
             if (killed)
                 AwardBallKillScore(shooter, scoreBefore, name);
             Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
-                name, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
+                name, damage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
                 ballForceApplied ? "applied" : "not applied");
 
             if (killed)
@@ -1467,11 +1471,11 @@ namespace ZeusOnlyMode
             return null;
         }
 
-        // 34 shock damage credited to the shooter, applied by a point_hurt aimed
+        // The ball's shock damage credited to the shooter, applied by a point_hurt aimed
         // at the victim so it goes through the game's normal damage and death
         // handling. If that has no effect, health is lowered directly (and the
         // forced kill used when it would reach zero).
-        private void DamagePawn(CCSPlayerPawn pawn, CCSPlayerPawn? attacker, Vector3 at, int before)
+        private void DamagePawn(CCSPlayerPawn pawn, CCSPlayerPawn? attacker, Vector3 at, int before, int damage)
         {
             try
             {
@@ -1483,7 +1487,7 @@ namespace ZeusOnlyMode
                     string targetName = $"zeusball_target_{pawn.Index}";
                     identity.Name = targetName;
 
-                    hurt.Damage = BallDamage;
+                    hurt.Damage = damage;
                     hurt.BitsDamageType = DamageTypes_t.DMG_SHOCK;
                     hurt.StrTarget = targetName;
                     hurt.Teleport(at, Vector3.Zero, Vector3.Zero);
@@ -1503,7 +1507,7 @@ namespace ZeusOnlyMode
             if (!pawn.IsValid || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE || pawn.Health < before)
                 return;
 
-            int remaining = before - BallDamage;
+            int remaining = before - damage;
             if (remaining <= 0)
             {
                 KillPawn(pawn);
