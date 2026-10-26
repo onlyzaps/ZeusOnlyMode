@@ -481,7 +481,7 @@ namespace ZeusOnlyMode
             SaveZeusColors();
         }
 
-        // One sliding line: the colors around the selected one, each name in
+        // A title over one sliding line: the colors around the selected one, each name in
         // its own color, the selected one in the middle as >Name<
         private static string BuildColorMenuHtml(ColorMenuState menu)
         {
@@ -495,7 +495,7 @@ namespace ZeusOnlyMode
                     ? $"<font color='{hex}'><b>&gt;{option.Name}&lt;</b></font>"
                     : $"<font color='{hex}'>{option.Name}</font>");
             }
-            return string.Join("&nbsp;&nbsp;", names);
+            return "<font color='#FFD700'><b>Zeus Color</b></font><br>" + string.Join("&nbsp;&nbsp;", names);
         }
 
         // Fed every tick while open with a 1s display time; when the menu
