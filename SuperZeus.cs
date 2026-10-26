@@ -1282,12 +1282,17 @@ namespace ZeusOnlyMode
         // 34 damage with the shooter's credit and the launch on the damage
         private void ApplyBallDamage(CCSPlayerPawn pawn, string name, CCSPlayerPawn? shooterPawn, Vector3 launch, Vector3 chest, int before)
         {
+            var shooter = shooterPawn != null && shooterPawn.IsValid ? shooterPawn.Controller.Value?.As<CCSPlayerController>() : null;
+            int scoreBefore = shooter?.Score ?? 0;
+
             pendingBallForces[pawn.Index] = new PendingBallHit(launch, chest, shooterPawn, FindZeus(shooterPawn));
             ballForceApplied = false;
             try { DamagePawn(pawn, shooterPawn, chest, before); }
             finally { pendingBallForces.Remove(pawn.Index); }
 
             bool killed = pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE;
+            if (killed)
+                AwardBallKillScore(shooter, scoreBefore, name);
             Logger.LogInformation("[SuperZeus] Hit {Name} for {Damage}: health {Before} -> {After}{Killed} (shooter credit + launch force {Force})",
                 name, BallDamage, before, killed ? 0 : pawn.Health, killed ? ", killed" : "",
                 ballForceApplied ? "applied" : "not applied");
@@ -1299,7 +1304,34 @@ namespace ZeusOnlyMode
             }
         }
 
-        // Launch force for the damage a ball is applying right now, by pawn index
+        // The game credits the kill (kill feed, "with taser" in the log) but
+        // adds no score for it, so the shooter gets a normal kill's points,
+        // unless the game already added some
+        private const int BallKillScore = 2;
+
+        private void AwardBallKillScore(CCSPlayerController? shooter, int scoreBefore, string victim)
+        {
+            if (shooter == null || !shooter.IsValid)
+                return;
+
+            try
+            {
+                if (shooter.Score != scoreBefore)
+                {
+                    Logger.LogInformation("[SuperZeus] {Shooter} already got {Points} points for killing {Victim}", shooter.PlayerName, shooter.Score - scoreBefore, victim);
+                    return;
+                }
+
+                shooter.Score += BallKillScore;
+                Utilities.SetStateChanged(shooter, "CCSPlayerController", "m_iScore");
+                Logger.LogInformation("[SuperZeus] {Shooter} +{Points} score for killing {Victim} (now {Score})", shooter.PlayerName, BallKillScore, victim, shooter.Score);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] Awarding kill score failed: {Message}", ex.Message);
+            }
+        }
+
         // What the damage a ball is applying right now should carry, by pawn index
         private sealed record PendingBallHit(Vector3 Launch, Vector3 At, CCSPlayerPawn? Attacker, CBasePlayerWeapon? Zeus);
 
