@@ -25,7 +25,7 @@ Hyper Zeus (hyperzeus / css_hyperzeus in console, !hyperzeus / /hyperzeus in cha
 balls are smaller, hit for 20 damage instead of 34, and fire three times as fast as the normal zap, from a three-ball energy pool that refills over mp_taser_recharge_time, and a normal zap empties the pool.
 It works on its own or alongside Super Zeus, and is also remembered across map changes and reloads.
 
-Reflect Zeus (reflect / css_reflect in console, !reflect / /reflect in chat, same admin flag, 1 or 0 to force it) makes Super and Hyper Zeus balls
+Reflect Zeus (reflect / css_reflect in console, !reflect / /reflect in chat, same admin flag, 1 or 0 to force it) makes Super and Hyper Zeus balls fly a little slower, trailing lines along their direction of travel, and
 bounce off walls and floors, angle in equals angle out, up to 3 times; the next surface they hit sets them off as usual. It is remembered across map changes and reloads.
 
 Zeus Colors

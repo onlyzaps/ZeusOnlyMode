@@ -27,6 +27,7 @@ namespace ZeusOnlyMode
         // 2100; at 2100 balls fired north/south/east/west vanished on launch
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
+        private const float ReflectBallSpeed = 1600f;   // Reflect Zeus balls, a little slower to follow their bounces
 
         // Volume for every sound the plugin plays (1 = the game's own level).
         // Read from settings.json on every load, so editing it and reloading
@@ -131,6 +132,7 @@ namespace ZeusOnlyMode
             public readonly List<CHandle<CBeam>> Glow = new();      // soft glow wedges
             public readonly List<CHandle<CBeam>> Core = new();      // small hot center
             public readonly List<Tendril> Tendrils = new();          // electric arcs
+            public readonly List<CHandle<CBeam>> Streaks = new();   // Reflect Zeus: lines along the direction of travel
             public required int OwnerSlot;
             public required byte OwnerTeam;
             public required ZeusColorOption? Color; // null = stock electric blue
@@ -140,6 +142,7 @@ namespace ZeusOnlyMode
             public required int Damage;
             public required float Size;   // 1 = a Super Zeus ball
             public int Age;
+            public bool Reflect;          // fired while Reflect Zeus was on
             public int SeenBounces;       // the carrier's bounce count already handled
             public int Reflections;       // times this ball has bounced (Reflect Zeus)
         }
@@ -778,7 +781,7 @@ namespace ZeusOnlyMode
 
             var spawnPos = eye + forward * 24f;
             var muzzle = eye + forward * 28f + right * (pawn.LeftHanded ? -7f : 7f) - up * 7f;
-            var velocity = forward * BallSpeed;
+            var velocity = forward * (reflectZeusEnabled ? ReflectBallSpeed : BallSpeed);
 
             // An invisible decoy carries the ball so the engine handles world collision for us
             var projectile = Utilities.CreateEntityByName<CDecoyProjectile>("decoy_projectile");
@@ -812,7 +815,8 @@ namespace ZeusOnlyMode
                 LastPosition = spawnPos,
                 ExpireTime = Server.CurrentTime + BallLifetime,
                 Damage = damage,
-                Size = size
+                Size = size,
+                Reflect = reflectZeusEnabled
             };
 
             // A small BFG-style ball in the player's color (stock blue on
@@ -842,6 +846,15 @@ namespace ZeusOnlyMode
                     if (line != null) tendril.Line.Add(HandleOf(line));
                 }
                 ball.Tendrils.Add(tendril);
+            }
+
+            if (ball.Reflect)
+            {
+                for (int i = 0; i < ReflectStreaks; i++)
+                {
+                    var streak = CreateBeam(spawnPos, spawnPos, Whiten(BoltGlowColor(ball.Color), 0.5f), 0.8f * size, 0.05f);
+                    if (streak != null) ball.Streaks.Add(HandleOf(streak));
+                }
             }
 
             var tail = CreateBeam(spawnPos, spawnPos, Scale(BoltGlowColor(ball.Color), 0.6f), 0.5f * size, 0.05f);
@@ -968,7 +981,7 @@ namespace ZeusOnlyMode
             if (projectile.Bounces > ball.SeenBounces)
             {
                 ball.SeenBounces = projectile.Bounces;
-                if (!reflectZeusEnabled || ball.Reflections >= MaxReflections)
+                if (!ball.Reflect || ball.Reflections >= MaxReflections)
                 {
                     LogBallEnd(ball, pos, ball.Reflections > 0 ? $"hit a wall after {ball.Reflections} bounces" : "hit a wall");
                     WallBurst(pos);
@@ -1624,6 +1637,28 @@ namespace ZeusOnlyMode
         // keeps its full speed. Each bounce scorches the surface and sparks.
         private const int MaxReflections = 3;
 
+        // Speed lines streaming back from the ball along its direction of
+        // travel, spaced evenly around it, so each bounce's new angle shows
+        private const int ReflectStreaks = 3;
+        private const float ReflectStreakLength = 70f;
+        private const float ReflectStreakSpread = 5f;
+
+        private static void AimStreaks(LightningBall ball, Vector3 pos)
+        {
+            var dir = Vector3.Normalize(ball.Velocity);
+            var reference = MathF.Abs(dir.Z) < 0.9f ? Vector3.UnitZ : Vector3.UnitX;
+            var side = Vector3.Normalize(Vector3.Cross(dir, reference));
+            var up = Vector3.Cross(side, dir);
+
+            for (int i = 0; i < ball.Streaks.Count; i++)
+            {
+                float a = i / (float)ball.Streaks.Count * MathF.PI * 2f;
+                var offset = (side * MathF.Cos(a) + up * MathF.Sin(a)) * ReflectStreakSpread * ball.Size;
+                var start = pos + offset - dir * BallGlowRadius * 0.5f * ball.Size;
+                MoveBallBeam(ball.Streaks[i], start, start - dir * ReflectStreakLength * ball.Size);
+            }
+        }
+
         private void ReflectBall(LightningBall ball, CDecoyProjectile projectile, Vector3 pos)
         {
             var incoming = ball.Velocity;
@@ -1752,6 +1787,9 @@ namespace ZeusOnlyMode
                     MoveBallBeam(s < tendril.Line.Count ? tendril.Line[s] : null, a, b);
                 }
             }
+
+            if (ball.Streaks.Count > 0)
+                AimStreaks(ball, pos);
 
             var tail = ball.Tail?.Value;
             if (tail != null && tail.IsValid)
@@ -2118,6 +2156,7 @@ namespace ZeusOnlyMode
         {
             RemoveEntity(ball.Projectile);
             if (ball.Tail != null) RemoveEntity(ball.Tail);
+            foreach (var beam in ball.Streaks) RemoveEntity(beam);
             foreach (var beam in ball.Glow) RemoveEntity(beam);
             foreach (var beam in ball.Core) RemoveEntity(beam);
             foreach (var tendril in ball.Tendrils)
