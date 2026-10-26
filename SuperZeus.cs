@@ -26,6 +26,9 @@ namespace ZeusOnlyMode
         // 2100; at 2100 balls fired north/south/east/west vanished on launch
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
+
+        // Volume for every sound the plugin plays (1 = the game's own level)
+        private const float SoundVolume = 0.6f;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
@@ -424,7 +427,7 @@ namespace ZeusOnlyMode
             if (zeus.Clip1 <= 0)
             {
                 Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
-                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
+                pawn.EmitSound("Weapon_Taser.ChargeNotReady", null, SoundVolume);
                 return;
             }
 
@@ -485,7 +488,7 @@ namespace ZeusOnlyMode
 
                 var owner = zeus.OwnerEntity.Value;
                 if (owner != null && owner.IsValid)
-                    owner.EmitSound("Weapon_Taser.ChargeReady");
+                    owner.EmitSound("Weapon_Taser.ChargeReady", null, SoundVolume);
 
                 pendingRecharges.RemoveAt(i);
             }
@@ -575,8 +578,8 @@ namespace ZeusOnlyMode
             SpawnParticle(FxMuzzleSmokePuff, muzzle, angles, 3f);
             SpawnParticle(FxMuzzleSmokeTrail, muzzle, angles, 5f, pawn);
 
-            pawn.EmitSound("Weapon_Taser.Single");
-            pawn.EmitSound("Weapon_Taser.ChargeReady_Zap");
+            pawn.EmitSound("Weapon_Taser.Single", null, SoundVolume);
+            pawn.EmitSound("Weapon_Taser.ChargeReady_Zap", null, SoundVolume);
 
             KickZeus(zeus);
         }
@@ -872,7 +875,7 @@ namespace ZeusOnlyMode
                 if (!lethal)
                 {
                     ImpactBurst(chest);
-                    pawn.EmitSound("Weapon_Taser.Hit");
+                    pawn.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
                 }
             }
             catch (Exception ex)
@@ -1089,10 +1092,10 @@ namespace ZeusOnlyMode
             SpawnFading(FxBurnSmoke, ground, BurnSmokeTime, BurnSmokeLinger);
 
             var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
-            flash?.EmitSound("Player.DeathTaser");
-            flash?.EmitSound("Weapon_Taser.Hit");
-            flash?.EmitSound("DoSpark");
-            flash?.EmitSound("Breakable.Spark");
+            flash?.EmitSound("Player.DeathTaser", null, SoundVolume);
+            flash?.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
+            flash?.EmitSound("DoSpark", null, SoundVolume);
+            flash?.EmitSound("Breakable.Spark", null, SoundVolume);
         }
 
         private const float DisintegrateCrackleLife = 0.4f;
@@ -1297,8 +1300,8 @@ namespace ZeusOnlyMode
         {
             LeaveScorch(pos);
             var burst = ImpactBurst(pos);
-            burst?.EmitSound("Weapon_Taser.Hit");
-            burst?.EmitSound("DoSpark");
+            burst?.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
+            burst?.EmitSound("DoSpark", null, SoundVolume);
         }
 
         // --- Scorch marks -----------------------------------------------------
