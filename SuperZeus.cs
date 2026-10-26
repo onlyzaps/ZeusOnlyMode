@@ -97,10 +97,9 @@ namespace ZeusOnlyMode
         private bool superZeusEnabled = false;
         private bool hyperZeusEnabled = false;   // fast alt-fire: a three-ball pool per charge
         private bool reflectZeusEnabled = false; // balls bounce off walls and floors
-        private bool splatterZeusEnabled = false; // balls split into bolts on the wall they end on
         private bool AltFireEnabled => superZeusEnabled || hyperZeusEnabled;
 
-        private enum ZeusMode { Super, Hyper, Reflect, Splatter }
+        private enum ZeusMode { Super, Hyper, Reflect }
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
@@ -133,7 +132,7 @@ namespace ZeusOnlyMode
             public readonly List<CHandle<CBeam>> Glow = new();      // soft glow wedges
             public readonly List<CHandle<CBeam>> Core = new();      // small hot center
             public readonly List<Tendril> Tendrils = new();          // electric arcs
-            public readonly List<CHandle<CBeam>> Streaks = new();   // Reflect Zeus: lines along the direction of travel
+            public readonly List<CHandle<CBeam>> Streaks = new();   // lines along the direction of travel
             public required int OwnerSlot;
             public required byte OwnerTeam;
             public required ZeusColorOption? Color; // null = stock electric blue
@@ -144,7 +143,6 @@ namespace ZeusOnlyMode
             public required float Size;   // 1 = a Super Zeus ball
             public int Age;
             public bool Reflect;          // fired while Reflect Zeus was on
-            public bool Splatter;         // fired while Splatter Zeus was on (fragments never splatter)
             public int SeenBounces;       // the carrier's bounce count already handled
             public int Reflections;       // times this ball has bounced (Reflect Zeus)
         }
@@ -166,9 +164,8 @@ namespace ZeusOnlyMode
                 superZeusEnabled = doc.RootElement.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean();
                 hyperZeusEnabled = doc.RootElement.TryGetProperty("hyper", out var hyper) && hyper.GetBoolean();
                 reflectZeusEnabled = doc.RootElement.TryGetProperty("reflect", out var reflect) && reflect.GetBoolean();
-                splatterZeusEnabled = doc.RootElement.TryGetProperty("splatter", out var splatter) && splatter.GetBoolean();
-                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}, Hyper Zeus is {Hyper}, Reflect Zeus is {Reflect}, Splatter Zeus is {Splatter}",
-                    superZeusEnabled ? "ON" : "OFF", hyperZeusEnabled ? "ON" : "OFF", reflectZeusEnabled ? "ON" : "OFF", splatterZeusEnabled ? "ON" : "OFF");
+                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}, Hyper Zeus is {Hyper}, Reflect Zeus is {Reflect}",
+                    superZeusEnabled ? "ON" : "OFF", hyperZeusEnabled ? "ON" : "OFF", reflectZeusEnabled ? "ON" : "OFF");
             }
             catch (Exception ex)
             {
@@ -181,7 +178,7 @@ namespace ZeusOnlyMode
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(superZeusStatePath)!);
-                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, hyper = hyperZeusEnabled, reflect = reflectZeusEnabled, splatter = splatterZeusEnabled }));
+                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, hyper = hyperZeusEnabled, reflect = reflectZeusEnabled }));
             }
             catch (Exception ex)
             {
@@ -358,7 +355,6 @@ namespace ZeusOnlyMode
             AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", ConCommand_SuperZeus);
             AddCommand("hyperzeus", "Toggle Hyper Zeus (rapid alt-fire lightning balls)", ConCommand_HyperZeus);
             AddCommand("reflect", "Toggle Reflect Zeus (lightning balls bounce off walls and floors)", ConCommand_ReflectZeus);
-            AddCommand("splatter", "Toggle Splatter Zeus (lightning balls split into bolts on walls)", ConCommand_SplatterZeus);
 
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
@@ -435,13 +431,6 @@ namespace ZeusOnlyMode
             ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Reflect);
         }
 
-        [ConsoleCommand("css_splatter", "Toggle Splatter Zeus (lightning balls split into bolts on walls)")]
-        public void ConCommand_SplatterZeus(CCSPlayerController? player, CommandInfo info)
-        {
-            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Splatter);
-        }
-
         private HookResult OnSuperZeusChat(CCSPlayerController? player, CommandInfo info)
         {
             var parts = info.GetArg(1).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -454,7 +443,6 @@ namespace ZeusOnlyMode
             if (word.Equals("superzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Super;
             else if (word.Equals("hyperzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Hyper;
             else if (word.Equals("reflect", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Reflect;
-            else if (word.Equals("splatter", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Splatter;
             else return HookResult.Continue;
 
             ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null, mode);
@@ -492,7 +480,6 @@ namespace ZeusOnlyMode
             {
                 ZeusMode.Hyper => hyperZeusEnabled,
                 ZeusMode.Reflect => reflectZeusEnabled,
-                ZeusMode.Splatter => splatterZeusEnabled,
                 _ => superZeusEnabled
             };
             bool newState = arg switch
@@ -512,7 +499,6 @@ namespace ZeusOnlyMode
             {
                 case ZeusMode.Hyper: hyperZeusEnabled = newState; break;
                 case ZeusMode.Reflect: reflectZeusEnabled = newState; break;
-                case ZeusMode.Splatter: splatterZeusEnabled = newState; break;
                 default: superZeusEnabled = newState; break;
             }
             SaveSuperZeusState();
@@ -523,8 +509,7 @@ namespace ZeusOnlyMode
                 string pitch = zeusMode switch
                 {
                     ZeusMode.Hyper => "Right-Click Rapidly With Your Zeus To Unleash Lightning Balls!",
-                    ZeusMode.Reflect => $"Lightning Balls Now Bounce Off Walls And Floors {MaxReflections} Times!",
-                    ZeusMode.Splatter => "Lightning Balls Now Splatter Into Bolts When They Hit A Wall!",
+                    ZeusMode.Reflect => "Lightning Balls Now Bounce Off A Wall Or Floor Once!",
                     _ => "Right-Click With Your Zeus To Hurl A Lightning Ball!"
                 };
                 Server.PrintToChatAll($" {ChatColors.LightBlue}{mode.ToUpperInvariant()} ENABLED{ChatColors.Default} - {pitch}");
@@ -535,7 +520,6 @@ namespace ZeusOnlyMode
                 if (superZeusEnabled) stillOn.Add("Super Zeus");
                 if (hyperZeusEnabled) stillOn.Add("Hyper Zeus");
                 if (reflectZeusEnabled) stillOn.Add("Reflect Zeus");
-                if (splatterZeusEnabled) stillOn.Add("Splatter Zeus");
                 string rest = stillOn.Count == 0 ? "" : $" {string.Join(" And ", stillOn)} {(stillOn.Count == 1 ? "Is" : "Are")} Still On.";
                 Server.PrintToChatAll($" {ChatColors.LightBlue}{mode} Disabled.{rest}");
             }
@@ -799,10 +783,8 @@ namespace ZeusOnlyMode
             var muzzle = eye + forward * 28f + right * (pawn.LeftHanded ? -7f : 7f) - up * 7f;
             var velocity = forward * (reflectZeusEnabled ? ReflectBallSpeed : BallSpeed);
 
-            // The splatter bolts ride along as the reflect streaks do
-            int streaks = reflectZeusEnabled || splatterZeusEnabled ? ReflectStreaks : 0;
             var ball = SpawnBall(pawn, player.Slot, pawn.TeamNum, GetZeusColor(player), spawnPos, velocity,
-                damage, size, BallLifetime, reflectZeusEnabled, splatterZeusEnabled, streaks);
+                damage, size, BallLifetime, reflectZeusEnabled);
             if (ball == null)
             {
                 Logger.LogError("[SuperZeus] Could not create the ball's carrier entity; no ball for {Name}", player.PlayerName);
@@ -825,7 +807,7 @@ namespace ZeusOnlyMode
         // A ball and its carrier, flying from spawnPos at velocity. The owner
         // pawn (if still around) is who the carrier ignores and credits.
         private LightningBall? SpawnBall(CCSPlayerPawn? ownerPawn, int ownerSlot, byte team, ZeusColorOption? color,
-            Vector3 spawnPos, Vector3 velocity, int damage, float size, float lifetime, bool reflect, bool splatter, int streaks)
+            Vector3 spawnPos, Vector3 velocity, int damage, float size, float lifetime, bool reflect)
         {
             if (ownerPawn != null && !ownerPawn.IsValid)
                 ownerPawn = null;
@@ -863,8 +845,7 @@ namespace ZeusOnlyMode
                 ExpireTime = Server.CurrentTime + lifetime,
                 Damage = damage,
                 Size = size,
-                Reflect = reflect,
-                Splatter = splatter
+                Reflect = reflect
             };
 
             // A small BFG-style ball in the player's color (stock blue on
@@ -896,7 +877,7 @@ namespace ZeusOnlyMode
                 ball.Tendrils.Add(tendril);
             }
 
-            for (int i = 0; i < streaks; i++)
+            for (int i = 0; i < BallStreaks; i++)
             {
                 var streak = CreateBeam(spawnPos, spawnPos, Whiten(BoltGlowColor(ball.Color), 0.5f), 0.8f * size, 0.05f);
                 if (streak != null) ball.Streaks.Add(HandleOf(streak));
@@ -1017,10 +998,8 @@ namespace ZeusOnlyMode
                 ball.SeenBounces = projectile.Bounces;
                 if (!ball.Reflect || ball.Reflections >= MaxReflections)
                 {
-                    LogBallEnd(ball, pos, ball.Reflections > 0 ? $"hit a wall after {ball.Reflections} bounces" : "hit a wall");
+                    LogBallEnd(ball, pos, ball.Reflections > 0 ? $"hit a wall after bouncing {ball.Reflections}x" : "hit a wall");
                     WallBurst(pos);
-                    if (ball.Splatter)
-                        SplatterBall(ball, projectile, pos);
                     return false;
                 }
 
@@ -1671,13 +1650,13 @@ namespace ZeusOnlyMode
         // change in velocity points along the surface's normal, though, so the
         // ball is mirrored off that normal exactly (angle in = angle out) and
         // keeps its full speed. Each bounce scorches the surface and sparks.
-        private const int MaxReflections = 3;
+        private const int MaxReflections = 1;
 
-        // Speed lines streaming back from the ball along its direction of
-        // travel, spaced evenly around it, so each bounce's new angle shows
-        private const int ReflectStreaks = 3;
-        private const float ReflectStreakLength = 70f;
-        private const float ReflectStreakSpread = 5f;
+        // Speed lines streaming back from every ball along its direction of
+        // travel, spaced evenly around it (so a bounce's new angle shows too)
+        private const int BallStreaks = 3;
+        private const float BallStreakLength = 70f;
+        private const float BallStreakSpread = 5f;
 
         private static void AimStreaks(LightningBall ball, Vector3 pos)
         {
@@ -1689,9 +1668,9 @@ namespace ZeusOnlyMode
             for (int i = 0; i < ball.Streaks.Count; i++)
             {
                 float a = i / (float)ball.Streaks.Count * MathF.PI * 2f;
-                var offset = ball.Streaks.Count == 1 ? Vector3.Zero : (side * MathF.Cos(a) + up * MathF.Sin(a)) * ReflectStreakSpread * ball.Size;
+                var offset = (side * MathF.Cos(a) + up * MathF.Sin(a)) * BallStreakSpread * ball.Size;
                 var start = pos + offset - dir * BallGlowRadius * 0.5f * ball.Size;
-                MoveBallBeam(ball.Streaks[i], start, start - dir * ReflectStreakLength * ball.Size);
+                MoveBallBeam(ball.Streaks[i], start, start - dir * BallStreakLength * ball.Size);
             }
         }
 
@@ -1707,49 +1686,6 @@ namespace ZeusOnlyMode
         {
             var reflected = incoming - 2f * Vector3.Dot(incoming, normal) * normal;
             return Vector3.Normalize(reflected.LengthSquared() < 1f ? -incoming : reflected);
-        }
-
-        // --- Splatter Zeus -------------------------------------------------------
-        //
-        // Where a splatter ball ends on a surface, each of its bolts (the lines
-        // it trails) breaks off as a small ball of its own, flung outward at a
-        // different angle around the bounce direction, always away from the
-        // surface. Bolts don't bounce or splatter again.
-        private const float SplatterSpread = 35f * MathF.PI / 180f;   // angle off the bounce direction
-        private const float SplatterSize = 0.5f;                       // of the parent ball
-        private const float SplatterLifetime = 1.2f;
-
-        private void SplatterBall(LightningBall ball, CDecoyProjectile projectile, Vector3 pos)
-        {
-            var normal = SurfaceNormal(ball.Velocity, projectile);
-            var bounce = Reflected(ball.Velocity, normal);
-            var reference = MathF.Abs(bounce.Z) < 0.9f ? Vector3.UnitZ : Vector3.UnitX;
-            var side = Vector3.Normalize(Vector3.Cross(bounce, reference));
-            var up = Vector3.Cross(side, bounce);
-
-            float speed = ball.Velocity.Length();
-            int bolts = Math.Max(ball.Streaks.Count, 1);
-            int damage = (ball.Damage + 1) / 2;
-            float twist = rng.NextSingle() * MathF.PI * 2f;
-            var shooterPawn = Utilities.GetPlayerFromSlot(ball.OwnerSlot)?.PlayerPawn.Value;
-
-            for (int i = 0; i < bolts; i++)
-            {
-                float a = twist + i / (float)bolts * MathF.PI * 2f;
-                var dir = bounce * MathF.Cos(SplatterSpread) + (side * MathF.Cos(a) + up * MathF.Sin(a)) * MathF.Sin(SplatterSpread);
-
-                // Never back into the surface
-                float away = Vector3.Dot(dir, normal);
-                if (away < 0.15f)
-                    dir += normal * (0.15f - away);
-                dir = Vector3.Normalize(dir);
-
-                SpawnBall(shooterPawn, ball.OwnerSlot, ball.OwnerTeam, ball.Color, pos + normal * 8f, dir * speed,
-                    damage, ball.Size * SplatterSize, SplatterLifetime, reflect: false, splatter: false, streaks: 1);
-            }
-
-            Logger.LogInformation("[SuperZeus] Ball from slot {Slot} splattered into {Count} bolts ({Damage} damage each)",
-                ball.OwnerSlot, bolts, damage);
         }
 
         private void ReflectBall(LightningBall ball, CDecoyProjectile projectile, Vector3 pos)
