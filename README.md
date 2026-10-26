@@ -49,7 +49,7 @@ and saved modes come back with superzeus 2). Teammates are never hurt.
 Zeus Colors
 -----------
 Any player can pick one color for their Zeus zap, lightning ball and grapple: Red, Orange, Yellow, Green, Blue (Default), Purple,
-Pink, Gold or Silver. Hold the Zeus and press Reload to step to the next color; a center panel shows the list. Each step takes
+Pink, Gold or Silver. Hold the Zeus and press Reload to step to the next color, or Inspect to step back (with superzeus 2, Inspect picks your fire mode instead); a center panel shows the list. Each step takes
 effect right away and the panel hides itself a few seconds after the last press, so it never stops you moving or shooting.
 Choices are remembered per player in addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/zeus_colors.json. Super Zeus does
 not need to be on to color your zap.

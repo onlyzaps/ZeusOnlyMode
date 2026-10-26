@@ -427,14 +427,17 @@ namespace ZeusOnlyMode
         //
         // Driven by a key the Zeus doesn't use, so it never stops anyone
         // moving or shooting: with the Zeus in hand, every Reload press steps
-        // to the next color (Inspect picks the fire mode, see FireModes.cs).
-        // Each step is saved immediately, and the panel hides itself a few
-        // seconds after the last press. It never reads chat numbers or clears
-        // the center panel, so other plugins' menus keep working as they do.
+        // to the next color and Inspect steps back (except with superzeus 2,
+        // where Inspect picks the fire mode, see FireModes.cs). Each step is
+        // saved immediately, and the panel hides itself a few seconds after
+        // the last press. It never reads chat numbers or clears the center
+        // panel, so other plugins' menus keep working as they do.
 
         private void OnZeusColorButtons(CCSPlayerController player, PlayerButtons pressed)
         {
-            if ((pressed & PlayerButtons.Reload) == 0 || player == null || !player.IsValid || player.IsBot)
+            bool next = (pressed & PlayerButtons.Reload) != 0;
+            bool back = (pressed & PlayerButtons.Inspect) != 0 && !AllFireModes;
+            if ((!next && !back) || player == null || !player.IsValid || player.IsBot)
                 return;
 
             var weapon = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
@@ -444,7 +447,7 @@ namespace ZeusOnlyMode
             if (!colorMenus.TryGetValue(player.Slot, out var menu))
                 menu = OpenColorMenu(player);
 
-            StepColor(player, menu, 1);
+            StepColor(player, menu, next ? 1 : -1);
         }
 
         private ColorMenuState OpenColorMenu(CCSPlayerController player)
