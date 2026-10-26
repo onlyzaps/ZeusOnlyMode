@@ -25,11 +25,94 @@ namespace ZeusOnlyMode
         private const float CameraDefaultPitch = 45f;    // looking down
         private const float CameraFloorPitch = -20f;     // a floor camera looks up a little
         private const float CameraMaxPanFromWall = 80f;  // a wall camera never looks into its own wall
-        private const float CameraStandOff = 10f;        // the webcam's center, out from the wall
+        private const float CameraArmLength = 8f;        // the head's pivot, out from the wall
+        private const float CameraViewAhead = 16f;       // the view sits just past the lens
+        private const float CameraBlinkPeriod = 1f;      // the light blinks while nobody watches
 
-        private static readonly Color CameraBodyColor = Color.FromArgb(255, 120, 125, 135);
         private static readonly Color CameraLedOn = Color.FromArgb(255, 255, 30, 30);
-        private static readonly Color CameraLedOff = Color.FromArgb(255, 70, 10, 10);
+        private static readonly Color CameraLedOff = Color.FromArgb(255, 60, 8, 8);
+
+        // --- The webcam model -------------------------------------------------
+        //
+        // Neon line segments in the player's color. Plate and Arm are laid on
+        // the surface (x = out of it, y = across, z = up it). Everything else
+        // is the head, in the camera's own frame (x = where it looks, y = right,
+        // z = up) from the pivot at the end of the arm, so it turns with the
+        // view: a wireframe housing with a soft glowing core, a round lens with
+        // a glint, a red light on top, and faint sightlines fanning out to
+        // show where it's looking (hidden while its owner watches through it).
+
+        private enum CameraPartKind { Plate, Arm, Edge, Core, Lens, Glint, Light, Sightline }
+
+        private sealed record CameraPart(CameraPartKind Kind, Vector3 A, Vector3 B);
+
+        private static readonly CameraPart[] CameraModel = BuildCameraModel();
+
+        private static CameraPart[] BuildCameraModel()
+        {
+            var parts = new List<CameraPart>();
+
+            // Mounting plate and arm
+            const float plate = 6f;
+            var corners = new[] { new Vector3(0.5f, -plate, -plate), new Vector3(0.5f, plate, -plate), new Vector3(0.5f, plate, plate), new Vector3(0.5f, -plate, plate) };
+            for (int i = 0; i < 4; i++)
+                parts.Add(new(CameraPartKind.Plate, corners[i], corners[(i + 1) % 4]));
+            parts.Add(new(CameraPartKind.Arm, new Vector3(0.5f, 0f, 0f), new Vector3(CameraArmLength, 0f, 0f)));
+
+            // Housing: a box from just behind the pivot to the lens
+            const float back = -3f, front = 11f, half = 4f;
+            Vector3 Box(float x, int sy, int sz) => new(x, sy * half, sz * half);
+            foreach (var (sy, sz) in new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) })
+                parts.Add(new(CameraPartKind.Edge, Box(back, sy, sz), Box(front, sy, sz)));
+            foreach (var x in new[] { back, front })
+            {
+                parts.Add(new(CameraPartKind.Edge, Box(x, -1, -1), Box(x, 1, -1)));
+                parts.Add(new(CameraPartKind.Edge, Box(x, 1, -1), Box(x, 1, 1)));
+                parts.Add(new(CameraPartKind.Edge, Box(x, 1, 1), Box(x, -1, 1)));
+                parts.Add(new(CameraPartKind.Edge, Box(x, -1, 1), Box(x, -1, -1)));
+            }
+            parts.Add(new(CameraPartKind.Core, new Vector3(back + 1f, 0f, 0f), new Vector3(front - 1f, 0f, 0f)));
+
+            // Lens ring and glint
+            const int ring = 10;
+            const float lensX = front + 0.5f, lensRadius = 3f;
+            for (int i = 0; i < ring; i++)
+            {
+                float a0 = i / (float)ring * MathF.PI * 2f, a1 = (i + 1) / (float)ring * MathF.PI * 2f;
+                parts.Add(new(CameraPartKind.Lens,
+                    new Vector3(lensX, MathF.Cos(a0) * lensRadius, MathF.Sin(a0) * lensRadius),
+                    new Vector3(lensX, MathF.Cos(a1) * lensRadius, MathF.Sin(a1) * lensRadius)));
+            }
+            parts.Add(new(CameraPartKind.Glint, new Vector3(lensX, 0f, 0f), new Vector3(lensX + 1f, 0f, 0f)));
+
+            // Recording light on top
+            parts.Add(new(CameraPartKind.Light, new Vector3(6f, 0f, half + 1.3f), new Vector3(6.9f, 0f, half + 1.3f)));
+
+            // Sightlines: the corners of its view, fading out
+            const float reach = 60f;
+            float wide = reach * MathF.Tan(22f * MathF.PI / 180f), tall = reach * MathF.Tan(14f * MathF.PI / 180f);
+            foreach (var (sy, sz) in new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) })
+                parts.Add(new(CameraPartKind.Sightline, new Vector3(lensX + 1f, sy * 1.5f, sz * 1.5f), new Vector3(lensX + reach, sy * wide, sz * tall)));
+
+            return parts.ToArray();
+        }
+
+        // Color and width (start, end) of each kind of part
+        private static (Color Color, float Width, float EndWidth) CameraPartStyle(CameraPartKind kind, ZeusColorOption? color)
+        {
+            var accent = BoltGlowColor(color);
+            return kind switch
+            {
+                CameraPartKind.Plate => (Scale(accent, 0.6f), 0.8f, 0.8f),
+                CameraPartKind.Arm => (Scale(Whiten(accent, 0.3f), 0.7f), 2.5f, 2.5f),
+                CameraPartKind.Edge => (Whiten(accent, 0.55f), 0.7f, 0.7f),
+                CameraPartKind.Core => (Scale(accent, 0.3f), 7f, 7f),
+                CameraPartKind.Lens => (Whiten(accent, 0.2f), 1f, 1f),
+                CameraPartKind.Glint => (Color.White, 2.5f, 2.5f),
+                CameraPartKind.Light => (CameraLedOff, 1.8f, 1.8f),
+                _ => (Scale(accent, 0.35f), 0.4f, 0.05f)
+            };
+        }
 
         private sealed class WallCamera
         {
@@ -48,7 +131,9 @@ namespace ZeusOnlyMode
             public float OutwardYaw;
             public Vector3 Angles;                     // where the camera looks (pitch, yaw, 0)
             public CHandle<CDynamicProp>? View;
-            public readonly List<CHandle<CBeam>> Parts = new();   // stem, body, cross, lens, light
+            public readonly List<CHandle<CBeam>?> Parts = new();   // one per CameraModel part
+            public Vector3 AimedAngles = new(float.NaN, float.NaN, 0f);
+            public bool LightLit;
 
             public bool Viewing;
             public Vector3 EyeAtToggle;
@@ -193,7 +278,15 @@ namespace ZeusOnlyMode
                     yaw = camera.OutwardYaw + Math.Clamp(WrapDegrees(yaw - camera.OutwardYaw), -CameraMaxPanFromWall, CameraMaxPanFromWall);
 
                 camera.Angles = new Vector3(pitch, yaw, 0f);
-                AimCamera(camera);
+                if (Vector3.DistanceSquared(camera.Angles, camera.AimedAngles) > 0.01f)
+                    AimCamera(camera, mount: false);
+            }
+
+            bool lit = camera.Viewing || Server.CurrentTime % CameraBlinkPeriod < CameraBlinkPeriod * 0.5f;
+            if (lit != camera.LightLit)
+            {
+                camera.LightLit = lit;
+                SetCameraLight(camera);
             }
             return true;
         }
@@ -236,12 +329,12 @@ namespace ZeusOnlyMode
                 camera.View = HandleOf(view);
             }
 
-            var lens = Whiten(BoltGlowColor(camera.Color), 0.5f);
-            AddCameraPart(camera, pos, CameraBodyColor, 1.2f);   // stem
-            AddCameraPart(camera, pos, CameraBodyColor, 6f);     // body
-            AddCameraPart(camera, pos, CameraBodyColor, 5f);     // cross
-            AddCameraPart(camera, pos, lens, 3.5f);              // lens
-            AddCameraPart(camera, pos, CameraLedOff, 1.2f);      // light
+            foreach (var part in CameraModel)
+            {
+                var (color, width, endWidth) = CameraPartStyle(part.Kind, camera.Color);
+                var beam = CreateBeam(pos, pos, color, width, endWidth);
+                camera.Parts.Add(beam != null ? HandleOf(beam) : null);
+            }
             AimCamera(camera);
 
             var flash = SpawnParticle(FxImpactFlare, pos, Vector3.Zero, 1f);
@@ -251,38 +344,53 @@ namespace ZeusOnlyMode
                 camera.OnWall ? "wall" : normal.Z > 0f ? "floor" : "ceiling");
         }
 
-        private static void AddCameraPart(WallCamera camera, Vector3 at, Color color, float width)
-        {
-            var beam = CreateBeam(at, at, color, width, width);
-            if (beam != null) camera.Parts.Add(HandleOf(beam));
-        }
-
-        // Lays out the webcam and the view along where the camera looks
-        private void AimCamera(WallCamera camera)
+        // Lays out the webcam along where the camera looks, and puts the view
+        // just past its lens. The plate and arm only need placing once.
+        private void AimCamera(WallCamera camera, bool mount = true)
         {
             AngleVectors(camera.Angles, out var look, out var right, out var up);
-            var center = camera.Anchor + camera.Normal * CameraStandOff;
+            var normal = camera.Normal;
+            var across = MathF.Abs(normal.Z) < 0.95f ? Vector3.Normalize(Vector3.Cross(Vector3.UnitZ, normal)) : Vector3.UnitX;
+            var wallUp = Vector3.Cross(normal, across);
+            var pivot = camera.Anchor + normal * CameraArmLength;
 
-            var points = new (Vector3 A, Vector3 B)[]
+            for (int i = 0; i < camera.Parts.Count && i < CameraModel.Length; i++)
             {
-                (camera.Anchor, camera.Anchor + camera.Normal * (CameraStandOff - 3f)),   // stem
-                (center - look * 4f, center + look * 4f),                                 // body
-                (center - right * 3f, center + right * 3f),                               // cross
-                (center + look * 4f, center + look * 5.5f),                               // lens
-                (center + up * 3.2f + look * 2.5f, center + up * 3.2f + look * 3.2f),     // light
-            };
-            for (int i = 0; i < camera.Parts.Count && i < points.Length; i++)
-                MoveBallBeam(camera.Parts[i], points[i].A, points[i].B);
+                var part = CameraModel[i];
+                if (part.Kind is CameraPartKind.Plate or CameraPartKind.Arm)
+                {
+                    if (mount)
+                        MoveBallBeam(camera.Parts[i],
+                            camera.Anchor + normal * part.A.X + across * part.A.Y + wallUp * part.A.Z,
+                            camera.Anchor + normal * part.B.X + across * part.B.Y + wallUp * part.B.Z);
+                    continue;
+                }
 
-            if (camera.Parts.Count == points.Length && camera.Parts[^1].Value is { } light && light.IsValid)
-            {
-                light.Render = camera.Viewing ? CameraLedOn : CameraLedOff;
-                Utilities.SetStateChanged(light, "CBaseModelEntity", "m_clrRender");
+                if (part.Kind == CameraPartKind.Sightline && camera.Viewing)
+                {
+                    MoveBallBeam(camera.Parts[i], pivot, pivot);   // out of the owner's view
+                    continue;
+                }
+
+                MoveBallBeam(camera.Parts[i],
+                    pivot + look * part.A.X + right * part.A.Y + up * part.A.Z,
+                    pivot + look * part.B.X + right * part.B.Y + up * part.B.Z);
             }
 
+            camera.AimedAngles = camera.Angles;
             var view = camera.View?.Value;
             if (view != null && view.IsValid)
-                view.Teleport(center + look * 7f, camera.Angles, Vector3.Zero);
+                view.Teleport(pivot + look * CameraViewAhead, camera.Angles, Vector3.Zero);
+        }
+
+        private static void SetCameraLight(WallCamera camera)
+        {
+            int index = Array.FindIndex(CameraModel, p => p.Kind == CameraPartKind.Light);
+            if (index < 0 || index >= camera.Parts.Count || camera.Parts[index]?.Value is not { } light || !light.IsValid)
+                return;
+
+            light.Render = camera.LightLit ? CameraLedOn : CameraLedOff;
+            Utilities.SetStateChanged(light, "CBaseModelEntity", "m_clrRender");
         }
 
         private void StartCameraView(CCSPlayerController player, CCSPlayerPawn pawn, WallCamera camera)
@@ -346,7 +454,8 @@ namespace ZeusOnlyMode
             }
             if (camera.Tip != null) RemoveEntity(camera.Tip);
             if (camera.View != null) RemoveEntity(camera.View);
-            foreach (var part in camera.Parts) RemoveEntity(part);
+            foreach (var part in camera.Parts)
+                if (part != null) RemoveEntity(part);
         }
 
         private void ClearCameras()

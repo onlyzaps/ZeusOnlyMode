@@ -95,26 +95,13 @@ namespace ZeusOnlyMode
             Logger.LogInformation("[SuperZeus] {Name} switched fire mode to {Mode}", player.PlayerName, next.Name);
         }
 
-        // One sliding line like the color selector: the previous mode,
-        // >picked< in the player's color, the next mode; what it does below
+        // Just the mode switched to, in the player's color
         private void ShowModePanel(CCSPlayerController player, FireModeInfo selected)
         {
             colorMenus.Remove(player.Slot);   // one panel at a time
 
             string accent = Hex(BoltGlowColor(GetZeusColor(player)));
-            int index = Array.IndexOf(FireModes, selected);
-            int count = FireModes.Length;
-            var names = new List<string>();
-            for (int offset = -1; offset <= 1; offset++)
-            {
-                var info = FireModes[((index + offset) % count + count) % count];
-                names.Add(offset == 0
-                    ? $"<font color='{accent}'><b>&gt;{info.Name}&lt;</b></font>"
-                    : $"<font color='#9E9E9E'>{info.Name}</font>");
-            }
-
-            string html = string.Join("&nbsp;&nbsp;", names) + $"<br><font color='#FFFFFF'>{selected.Description}</font>";
-            modePanels[player.Slot] = (html, Server.CurrentTime + ModePanelSeconds);
+            modePanels[player.Slot] = ($"<font color='{accent}'><b>{selected.Name}</b></font>", Server.CurrentTime + ModePanelSeconds);
         }
 
         // Fed every tick while shown, like the color menu
