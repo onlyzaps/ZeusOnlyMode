@@ -38,7 +38,7 @@ namespace ZeusOnlyMode
             new("silver", "Silver", Color.FromArgb(195, 205, 220), ChatColors.Silver),
         };
 
-        private const int ColorMenuWindow = 2;        // colors shown either side of the selection
+        private const int ColorMenuWindow = 1;        // colors shown either side of the selection
         private const float ColorMenuIdleSeconds = 2.5f; // panel hides this long after the last press
 
         private sealed class ZeusColorPrefs

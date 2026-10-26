@@ -1,7 +1,6 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Logging;
-using System.Text;
 using System.Text.Json;
 
 namespace ZeusOnlyMode
@@ -94,25 +93,26 @@ namespace ZeusOnlyMode
             Logger.LogInformation("[SuperZeus] {Name} switched fire mode to {Mode}", player.PlayerName, next.Name);
         }
 
-        // Every mode listed, the picked one bold in the player's color, with
-        // what it does underneath
+        // One sliding line like the color selector: the previous mode,
+        // >picked< in the player's color, the next mode; what it does below
         private void ShowModePanel(CCSPlayerController player, FireModeInfo selected)
         {
             colorMenus.Remove(player.Slot);   // one panel at a time
 
             string accent = Hex(BoltGlowColor(GetZeusColor(player)));
-            var sb = new StringBuilder("<font color='#FFD700'><b>Fire Mode</b></font>");
-            foreach (var info in FireModes)
+            int index = Array.IndexOf(FireModes, selected);
+            int count = FireModes.Length;
+            var names = new List<string>();
+            for (int offset = -1; offset <= 1; offset++)
             {
-                if (info.Mode == selected.Mode)
-                    sb.Append($"<br><font color='{accent}'><b>&gt; {info.Name} &lt;</b></font>");
-                else
-                    sb.Append($"<br><font color='#9E9E9E'>{info.Name}</font>");
+                var info = FireModes[((index + offset) % count + count) % count];
+                names.Add(offset == 0
+                    ? $"<font color='{accent}'><b>&gt;{info.Name}&lt;</b></font>"
+                    : $"<font color='#9E9E9E'>{info.Name}</font>");
             }
-            sb.Append($"<br><font color='#FFFFFF'>{selected.Description}</font>");
-            sb.Append("<br><font color='#9E9E9E'>Inspect: Next Mode | Reload: Next Color</font>");
 
-            modePanels[player.Slot] = (sb.ToString(), Server.CurrentTime + ModePanelSeconds);
+            string html = string.Join("&nbsp;&nbsp;", names) + $"<br><font color='#FFFFFF'>{selected.Description}</font>";
+            modePanels[player.Slot] = (html, Server.CurrentTime + ModePanelSeconds);
         }
 
         // Fed every tick while shown, like the color menu
