@@ -28,6 +28,10 @@ It works on its own or alongside Super Zeus, and is also remembered across map c
 Reflect Zeus (reflect / css_reflect in console, !reflect / /reflect in chat, same admin flag, 1 or 0 to force it) makes Super and Hyper Zeus balls fly a little slower, trailing lines along their direction of travel, and
 bounce off walls and floors, angle in equals angle out, up to 3 times; the next surface they hit sets them off as usual. It is remembered across map changes and reloads.
 
+Splatter Zeus (splatter / css_splatter in console, !splatter / /splatter in chat, same admin flag, 1 or 0 to force it) gives balls three trailing bolts;
+where a ball ends on a wall or floor, each bolt splits off as a small ball flung outward at its own angle, for half the ball's damage.
+With Reflect Zeus also on, balls bounce first and splatter on the surface they end on. It is remembered across map changes and reloads.
+
 Zeus Colors
 -----------
 Any player can pick one color for both their Zeus zap and their lightning ball: Red, Orange,
