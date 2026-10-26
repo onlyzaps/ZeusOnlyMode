@@ -24,7 +24,6 @@ namespace ZeusOnlyMode
         // ------------------------------------------------------------------
 
         private const float CameraShotLifetime = 1.5f;   // about 2800 units of reach
-        private const float CameraMaxPanFromWall = 80f;  // a wall camera never looks into its own wall
         private const float CameraPanYawSpeed = 90f;     // degrees/s with A / D
         private const float CameraPanPitchSpeed = 60f;   // degrees/s with W / S
         private const float CameraBorderDistance = 10f;  // the screen border, in front of the view
@@ -130,7 +129,6 @@ namespace ZeusOnlyMode
             public Vector3 Anchor;
             public Vector3 Normal;
             public bool OnWall;
-            public float OutwardYaw;
             public Vector3 Angles;                     // where the camera looks (pitch, yaw, 0)
             public CHandle<CDynamicProp>? View;
             public readonly List<CHandle<CBeam>?> Parts = new();   // one per CameraModel part
@@ -303,14 +301,54 @@ namespace ZeusOnlyMode
             return true;
         }
 
-        // Pitch within straight up / down; a wall camera never looks into its wall
+        // The widest view a player sees (90 degrees on 4:3, widened to 16:9):
+        // tangents of half the width and half the height
+        private const float CameraTanHalfWide = 1.3333f;
+        private const float CameraTanHalfTall = 0.75f;
+
+        // Keeps the whole picture off the surface the camera is mounted on.
+        // If any corner of the view would look behind that surface, the
+        // angle is pulled back toward looking straight out of it, as little
+        // as needed. Works the same on walls, floors and ceilings.
         private static Vector3 ClampCameraAngles(WallCamera camera, Vector3 angles)
         {
-            float pitch = Math.Clamp(angles.X, -89f, 89f);
-            float yaw = angles.Y;
-            if (camera.OnWall)
-                yaw = camera.OutwardYaw + Math.Clamp(WrapDegrees(yaw - camera.OutwardYaw), -CameraMaxPanFromWall, CameraMaxPanFromWall);
-            return new Vector3(pitch, WrapDegrees(yaw), 0f);
+            var wanted = new Vector3(Math.Clamp(angles.X, -89f, 89f), WrapDegrees(angles.Y), 0f);
+            if (!SeesBehind(wanted, camera.Normal))
+                return wanted;
+
+            // Straight out of the surface (a floor or ceiling keeps the wanted yaw)
+            var n = camera.Normal;
+            var safe = new Vector3(
+                Math.Clamp(-MathF.Asin(Math.Clamp(n.Z, -1f, 1f)) * 180f / MathF.PI, -89f, 89f),
+                MathF.Abs(n.Z) < 0.95f ? MathF.Atan2(n.Y, n.X) * 180f / MathF.PI : wanted.Y,
+                0f);
+
+            float yawSpan = WrapDegrees(wanted.Y - safe.Y);
+            Vector3 At(float t) => new(safe.X + (wanted.X - safe.X) * t, WrapDegrees(safe.Y + yawSpan * t), 0f);
+
+            float lo = 0f, hi = 1f;
+            for (int i = 0; i < 12; i++)
+            {
+                float mid = (lo + hi) * 0.5f;
+                if (SeesBehind(At(mid), n)) hi = mid; else lo = mid;
+            }
+            return At(lo);
+        }
+
+        // Whether any corner of the view at these angles points behind the surface
+        private static bool SeesBehind(Vector3 angles, Vector3 normal)
+        {
+            AngleVectors(angles, out var look, out var right, out var up);
+            foreach (var sx in new[] { -1f, 1f })
+            {
+                foreach (var sy in new[] { -1f, 1f })
+                {
+                    var corner = Vector3.Normalize(look + right * (sx * CameraTanHalfWide) + up * (sy * CameraTanHalfTall));
+                    if (Vector3.Dot(corner, normal) < 0.02f)
+                        return true;
+                }
+            }
+            return false;
         }
 
         private static float WrapDegrees(float angle)
@@ -329,7 +367,6 @@ namespace ZeusOnlyMode
             camera.Anchor = pos;
             camera.Normal = normal;
             camera.OnWall = MathF.Abs(normal.Z) < 0.7f;
-            camera.OutwardYaw = MathF.Atan2(normal.Y, normal.X) * 180f / MathF.PI;
 
             // Looking back along the line it was shot from
             var back = -Vector3.Normalize(camera.Velocity);
