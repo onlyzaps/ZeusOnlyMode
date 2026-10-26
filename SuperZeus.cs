@@ -27,8 +27,11 @@ namespace ZeusOnlyMode
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
 
-        // Volume for every sound the plugin plays (1 = the game's own level)
-        private const float SoundVolume = 0.6f;
+        // Volume for every sound the plugin plays (1 = the game's own level).
+        // Read from settings.json on every load, so editing it and reloading
+        // the plugin applies the new value.
+        private const float DefaultSoundVolume = 0.4f;
+        private float SoundVolume = DefaultSoundVolume;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
@@ -161,8 +164,35 @@ namespace ZeusOnlyMode
             }
         }
 
+        // configs/plugins/ZeusOnlyMode/settings.json, created with defaults if missing
+        private void LoadSettings()
+        {
+            string path = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "ZeusOnlyMode", "settings.json"));
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    File.WriteAllText(path, JsonSerializer.Serialize(new { SoundVolume = DefaultSoundVolume }, new JsonSerializerOptions { WriteIndented = true }));
+                }
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                SoundVolume = doc.RootElement.TryGetProperty("SoundVolume", out var volume) && volume.TryGetSingle(out var value)
+                    ? Math.Clamp(value, 0f, 1f)
+                    : DefaultSoundVolume;
+            }
+            catch (Exception ex)
+            {
+                SoundVolume = DefaultSoundVolume;
+                Logger.LogError("Could not read {Path}: {Message}", path, ex.Message);
+            }
+
+            Logger.LogInformation("[SuperZeus] Sound volume {Volume} (settings.json)", SoundVolume);
+        }
+
         private void LoadSuperZeus()
         {
+            LoadSettings();
             LoadSuperZeusState();
 
             // Both spellings work from console/RCON. CS# also forwards "!superzeus"
