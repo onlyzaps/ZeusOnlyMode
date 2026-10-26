@@ -27,11 +27,9 @@ namespace ZeusOnlyMode
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
 
-        // Volume for every sound the plugin plays (1 = the game's own level).
-        // Read from settings.json on every load, so editing it and reloading
-        // the plugin applies the new value.
-        private const float DefaultSoundVolume = 0.4f;
-        private float SoundVolume = DefaultSoundVolume;
+        // Sounds are kept to one per event: CS2 plays sound events at full level
+        // whatever volume EmitSound is given, so loudness is controlled by not
+        // stacking several sounds on one moment.
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
@@ -164,35 +162,8 @@ namespace ZeusOnlyMode
             }
         }
 
-        // configs/plugins/ZeusOnlyMode/settings.json, created with defaults if missing
-        private void LoadSettings()
-        {
-            string path = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "ZeusOnlyMode", "settings.json"));
-            try
-            {
-                if (!File.Exists(path))
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    File.WriteAllText(path, JsonSerializer.Serialize(new { SoundVolume = DefaultSoundVolume }, new JsonSerializerOptions { WriteIndented = true }));
-                }
-
-                using var doc = JsonDocument.Parse(File.ReadAllText(path));
-                SoundVolume = doc.RootElement.TryGetProperty("SoundVolume", out var volume) && volume.TryGetSingle(out var value)
-                    ? Math.Clamp(value, 0f, 1f)
-                    : DefaultSoundVolume;
-            }
-            catch (Exception ex)
-            {
-                SoundVolume = DefaultSoundVolume;
-                Logger.LogError("Could not read {Path}: {Message}", path, ex.Message);
-            }
-
-            Logger.LogInformation("[SuperZeus] Sound volume {Volume} (settings.json)", SoundVolume);
-        }
-
         private void LoadSuperZeus()
         {
-            LoadSettings();
             LoadSuperZeusState();
 
             // Both spellings work from console/RCON. CS# also forwards "!superzeus"
@@ -457,7 +428,7 @@ namespace ZeusOnlyMode
             if (zeus.Clip1 <= 0)
             {
                 Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
-                pawn.EmitSound("Weapon_Taser.ChargeNotReady", null, SoundVolume);
+                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
                 return;
             }
 
@@ -518,7 +489,7 @@ namespace ZeusOnlyMode
 
                 var owner = zeus.OwnerEntity.Value;
                 if (owner != null && owner.IsValid)
-                    owner.EmitSound("Weapon_Taser.ChargeReady", null, SoundVolume);
+                    owner.EmitSound("Weapon_Taser.ChargeReady");
 
                 pendingRecharges.RemoveAt(i);
             }
@@ -608,8 +579,7 @@ namespace ZeusOnlyMode
             SpawnParticle(FxMuzzleSmokePuff, muzzle, angles, 3f);
             SpawnParticle(FxMuzzleSmokeTrail, muzzle, angles, 5f, pawn);
 
-            pawn.EmitSound("Weapon_Taser.Single", null, SoundVolume);
-            pawn.EmitSound("Weapon_Taser.ChargeReady_Zap", null, SoundVolume);
+            pawn.EmitSound("Weapon_Taser.Single");
 
             KickZeus(zeus);
         }
@@ -905,7 +875,7 @@ namespace ZeusOnlyMode
                 if (!lethal)
                 {
                     ImpactBurst(chest);
-                    pawn.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
+                    pawn.EmitSound("Weapon_Taser.Hit");
                 }
             }
             catch (Exception ex)
@@ -1122,10 +1092,7 @@ namespace ZeusOnlyMode
             SpawnFading(FxBurnSmoke, ground, BurnSmokeTime, BurnSmokeLinger);
 
             var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
-            flash?.EmitSound("Player.DeathTaser", null, SoundVolume);
-            flash?.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
-            flash?.EmitSound("DoSpark", null, SoundVolume);
-            flash?.EmitSound("Breakable.Spark", null, SoundVolume);
+            flash?.EmitSound("Player.DeathTaser");
         }
 
         private const float DisintegrateCrackleLife = 0.4f;
@@ -1330,8 +1297,7 @@ namespace ZeusOnlyMode
         {
             LeaveScorch(pos);
             var burst = ImpactBurst(pos);
-            burst?.EmitSound("Weapon_Taser.Hit", null, SoundVolume);
-            burst?.EmitSound("DoSpark", null, SoundVolume);
+            burst?.EmitSound("DoSpark");
         }
 
         // --- Scorch marks -----------------------------------------------------

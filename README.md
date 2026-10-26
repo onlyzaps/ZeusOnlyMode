@@ -34,9 +34,5 @@ to be on to color your zap.
 A colored zap is drawn over the stock zap. A colored lightning ball is drawn with colored rays, a
 tail and sparks.
 
-Settings live in addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/settings.json (created on
-first load): SoundVolume (0 to 1, default 0.4) sets the volume of every sound the plugin plays.
-It is re-read whenever the plugin loads, so edit it and reload the plugin to apply a change.
-
 Note: the lightning ball effects are precached on map load, so change the map once after installing
 or hot-loading the plugin.
