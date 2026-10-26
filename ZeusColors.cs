@@ -14,10 +14,11 @@ namespace ZeusOnlyMode
     public partial class ZeusOnlyPlugin
     {
         // ------------------------------------------------------------------
-        // zeuscolor: a per-player color for their Zeus zap and lightning
-        // ball, picked from a center-screen panel with Reload / Inspect (see
-        // Menu below). Every option is shown in its own color. Choices persist
-        // per SteamID in configs/plugins/ZeusOnlyMode/zeus_colors.json.
+        // A per-player color for their Zeus zap and lightning ball: Reload
+        // with the Zeus in hand steps to the next color, shown on a
+        // center-screen panel (see Menu below) with every option in its own
+        // color. Choices persist per SteamID in
+        // configs/plugins/ZeusOnlyMode/zeus_colors.json.
         // ------------------------------------------------------------------
 
         // Chat is the closest CS2 chat color (chat has fewer colors than the
@@ -30,14 +31,14 @@ namespace ZeusOnlyMode
             new("orange", "Orange", Color.FromArgb(255, 135, 25), ChatColors.Orange),
             new("yellow", "Yellow", Color.FromArgb(255, 240, 60), ChatColors.Yellow),
             new("green", "Green", Color.FromArgb(50, 220, 70), ChatColors.Green),
-            new("default", "Blue (Default)", Color.FromArgb(90, 160, 255), ChatColors.Blue),
+            new("default", "Blue", Color.FromArgb(90, 160, 255), ChatColors.Blue),
             new("purple", "Purple", Color.FromArgb(160, 60, 235), ChatColors.Purple),
             new("pink", "Pink", Color.FromArgb(255, 120, 200), ChatColors.LightRed),
             new("gold", "Gold", Color.FromArgb(255, 200, 40), ChatColors.Gold),
             new("silver", "Silver", Color.FromArgb(195, 205, 220), ChatColors.Silver),
         };
 
-        private const int ColorMenuWindow = 2;        // colors shown above / below the selection
+        private const int ColorMenuWindow = 2;        // colors shown either side of the selection
         private const float ColorMenuIdleSeconds = 2.5f; // panel hides this long after the last press
 
         private sealed class ZeusColorPrefs
@@ -78,23 +79,6 @@ namespace ZeusOnlyMode
                 Logger.LogError("Could not read {Path}: {Message}", zeusColorsPath, ex.Message);
             }
 
-            // Bare name (no css_ prefix) so CSS's own !/ chat dispatch never
-            // fires it a second time on top of our chat handler
-            foreach (var name in new[] { "zeuscolor", "css_zeuscolor" })
-            AddCommand(name, "Show the Zeus color menu (or press Reload with the Zeus)", (player, info) =>
-            {
-                if (player == null || !player.IsValid || player.IsBot)
-                {
-                    info.ReplyToCommand("zeuscolor can only be used by a player.");
-                    return;
-                }
-                OpenColorMenu(player);
-            });
-
-            // Distinct delegates per command (see LoadSuperZeus for why)
-            AddCommandListener("say", (player, info) => OnZeusColorChat(player, info));
-            AddCommandListener("say_team", (player, info) => OnZeusColorChat(player, info));
-
             RegisterEventHandler<EventWeaponFire>(OnZapFired);
             RegisterEventHandler<EventBulletImpact>(OnZapImpact);
 
@@ -110,22 +94,6 @@ namespace ZeusOnlyMode
                 colorMenus.Remove(slot);
                 pendingZaps.Remove(slot);
             });
-        }
-
-        // zeuscolor (with or without ! or /) opens the menu and is swallowed
-        // so other players never see it. Nothing else in chat is touched.
-        private HookResult OnZeusColorChat(CCSPlayerController? player, CommandInfo info)
-        {
-            if (player == null || !player.IsValid || player.IsBot)
-                return HookResult.Continue;
-
-            string clean = info.GetArg(1).Trim().TrimStart('!', '/').Trim();
-            if (!clean.Equals("zeuscolor", StringComparison.OrdinalIgnoreCase))
-                return HookResult.Continue;
-
-            OpenColorMenu(player);
-            player.PrintToChat($" {ChatColors.Gold}Zeus Color{ChatColors.Default}: hold the Zeus and press {ChatColors.Green}Reload{ChatColors.Default} for the next color, {ChatColors.Green}Inspect{ChatColors.Default} for the previous.");
-            return HookResult.Handled;
         }
 
         // --- Colored primary zap -------------------------------------------
@@ -457,18 +425,16 @@ namespace ZeusOnlyMode
 
         // --- Menu ----------------------------------------------------------
         //
-        // Driven entirely by keys the Zeus doesn't use, so it never stops
-        // anyone moving or shooting: with the Zeus in hand, Reload opens the
-        // menu and steps to the next color, Inspect (F) steps back. Each step
-        // is saved immediately, and the panel hides itself a few seconds
-        // after the last press. It never reads chat numbers or clears the
-        // center panel, so other plugins' menus keep working as they do.
+        // Driven by a key the Zeus doesn't use, so it never stops anyone
+        // moving or shooting: with the Zeus in hand, every Reload press steps
+        // to the next color (Inspect picks the fire mode, see FireModes.cs).
+        // Each step is saved immediately, and the panel hides itself a few
+        // seconds after the last press. It never reads chat numbers or clears
+        // the center panel, so other plugins' menus keep working as they do.
 
         private void OnZeusColorButtons(CCSPlayerController player, PlayerButtons pressed)
         {
-            bool reload = (pressed & PlayerButtons.Reload) != 0;
-            bool inspect = (pressed & PlayerButtons.Inspect) != 0;
-            if ((!reload && !inspect) || player == null || !player.IsValid || player.IsBot)
+            if ((pressed & PlayerButtons.Reload) == 0 || player == null || !player.IsValid || player.IsBot)
                 return;
 
             var weapon = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;
@@ -476,18 +442,15 @@ namespace ZeusOnlyMode
                 return;
 
             if (!colorMenus.TryGetValue(player.Slot, out var menu))
-            {
-                // Inspect alone just inspects; only Reload opens the menu
-                if (reload)
-                    OpenColorMenu(player);
-                return;
-            }
+                menu = OpenColorMenu(player);
 
-            StepColor(player, menu, reload ? 1 : -1);
+            StepColor(player, menu, 1);
         }
 
-        private void OpenColorMenu(CCSPlayerController player)
+        private ColorMenuState OpenColorMenu(CCSPlayerController player)
         {
+            modePanels.Remove(player.Slot);   // one panel at a time
+
             var current = GetZeusColor(player)?.Key ?? "default";
             var menu = new ColorMenuState
             {
@@ -496,6 +459,7 @@ namespace ZeusOnlyMode
             };
             colorMenus[player.Slot] = menu;
             menu.Html = BuildColorMenuHtml(menu);
+            return menu;
         }
 
         private void StepColor(CCSPlayerController player, ColorMenuState menu, int step)
@@ -517,26 +481,21 @@ namespace ZeusOnlyMode
             SaveZeusColors();
         }
 
-        // A window of colors around the selected one, each row in its own
-        // color, the selected row bold and marked
+        // One sliding line: the colors around the selected one, each name in
+        // its own color, the selected one in the middle as >Name<
         private static string BuildColorMenuHtml(ColorMenuState menu)
         {
-            var sb = new StringBuilder();
-            sb.Append("<font color='#FFD700'><b>Zeus Color</b></font>");
-
+            var names = new List<string>();
             int count = ZeusColorOptions.Length;
             for (int offset = -ColorMenuWindow; offset <= ColorMenuWindow; offset++)
             {
                 var option = ZeusColorOptions[((menu.Index + offset) % count + count) % count];
                 string hex = Hex(option.Color);
-                if (offset == 0)
-                    sb.Append($"<br><font color='{hex}'><b>&gt; {option.Name} &lt;</b></font>");
-                else
-                    sb.Append($"<br><font color='{hex}'>{option.Name}</font>");
+                names.Add(offset == 0
+                    ? $"<font color='{hex}'><b>&gt;{option.Name}&lt;</b></font>"
+                    : $"<font color='{hex}'>{option.Name}</font>");
             }
-
-            sb.Append("<br><font color='#9E9E9E'>Reload: Next | Inspect: Previous</font>");
-            return sb.ToString();
+            return string.Join("&nbsp;&nbsp;", names);
         }
 
         // Fed every tick while open with a 1s display time; when the menu

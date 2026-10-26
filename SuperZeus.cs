@@ -94,12 +94,11 @@ namespace ZeusOnlyMode
         private static readonly Color ArcCoreColor = Color.FromArgb(255, 210, 240, 255);
         private static readonly Color ArcGlowColor = Color.FromArgb(255, 70, 150, 255);
 
-        private bool superZeusEnabled = false;
-        private bool hyperZeusEnabled = false;   // fast alt-fire: a three-ball pool per charge
-        private bool reflectZeusEnabled = false; // balls bounce off walls and floors
-        private bool AltFireEnabled => superZeusEnabled || hyperZeusEnabled;
-
-        private enum ZeusMode { Super, Hyper, Reflect }
+        // 0 = off, 1 = lightning balls only, 2 = every fire mode (each player
+        // picks theirs with Inspect, see FireModes.cs)
+        private int superZeusLevel = 0;
+        private bool superZeusEnabled => superZeusLevel > 0;
+        private bool AllFireModes => superZeusLevel >= 2;
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
@@ -161,11 +160,11 @@ namespace ZeusOnlyMode
                     return;
 
                 using var doc = JsonDocument.Parse(File.ReadAllText(superZeusStatePath));
-                superZeusEnabled = doc.RootElement.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean();
-                hyperZeusEnabled = doc.RootElement.TryGetProperty("hyper", out var hyper) && hyper.GetBoolean();
-                reflectZeusEnabled = doc.RootElement.TryGetProperty("reflect", out var reflect) && reflect.GetBoolean();
-                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}, Hyper Zeus is {Hyper}, Reflect Zeus is {Reflect}",
-                    superZeusEnabled ? "ON" : "OFF", hyperZeusEnabled ? "ON" : "OFF", reflectZeusEnabled ? "ON" : "OFF");
+                var root = doc.RootElement;
+                superZeusLevel = root.TryGetProperty("level", out var level) && level.TryGetInt32(out var saved)
+                    ? Math.Clamp(saved, 0, 2)
+                    : root.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean() ? 1 : 0;
+                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus level {Level}", superZeusLevel);
             }
             catch (Exception ex)
             {
@@ -178,7 +177,7 @@ namespace ZeusOnlyMode
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(superZeusStatePath)!);
-                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, hyper = hyperZeusEnabled, reflect = reflectZeusEnabled }));
+                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, level = superZeusLevel }));
             }
             catch (Exception ex)
             {
@@ -345,6 +344,7 @@ namespace ZeusOnlyMode
         {
             LoadSettings();
             LoadSuperZeusState();
+            LoadFireModes();
             soundLogsLeft = 6;
             HookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
 
@@ -353,8 +353,6 @@ namespace ZeusOnlyMode
             // can both fire for one chat line; the debounce in ToggleSuperZeus
             // makes that a single toggle.
             AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", ConCommand_SuperZeus);
-            AddCommand("hyperzeus", "Toggle Hyper Zeus (rapid alt-fire lightning balls)", ConCommand_HyperZeus);
-            AddCommand("reflect", "Toggle Reflect Zeus (lightning balls bounce off walls and floors)", ConCommand_ReflectZeus);
 
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
@@ -382,6 +380,7 @@ namespace ZeusOnlyMode
                 ballSparks.Clear();
                 pendingRecharges.Clear();
                 ballEnergy.Clear();
+                grapples.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
                 bodyFades.Clear();
@@ -398,6 +397,7 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventRoundStart>((ev, info) =>
             {
                 ClearLightningBalls();
+                ClearGrapples();
                 return HookResult.Continue;
             });
         }
@@ -406,6 +406,7 @@ namespace ZeusOnlyMode
         {
             UnhookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
             ClearLightningBalls();
+            ClearGrapples();
         }
 
         // css_superzeus: registered by attribute, exactly like other plugins'
@@ -414,21 +415,7 @@ namespace ZeusOnlyMode
         public void ConCommand_SuperZeus(CCSPlayerController? player, CommandInfo info)
         {
             Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Super);
-        }
-
-        [ConsoleCommand("css_hyperzeus", "Toggle Hyper Zeus (rapid alt-fire lightning balls)")]
-        public void ConCommand_HyperZeus(CCSPlayerController? player, CommandInfo info)
-        {
-            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Hyper);
-        }
-
-        [ConsoleCommand("css_reflect", "Toggle Reflect Zeus (lightning balls bounce off walls and floors)")]
-        public void ConCommand_ReflectZeus(CCSPlayerController? player, CommandInfo info)
-        {
-            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Reflect);
+            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
         }
 
         private HookResult OnSuperZeusChat(CCSPlayerController? player, CommandInfo info)
@@ -439,25 +426,22 @@ namespace ZeusOnlyMode
 
             string word = parts[0].TrimStart('!', '/');
 
-            ZeusMode mode;
-            if (word.Equals("superzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Super;
-            else if (word.Equals("hyperzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Hyper;
-            else if (word.Equals("reflect", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Reflect;
-            else return HookResult.Continue;
+            if (!word.Equals("superzeus", StringComparison.OrdinalIgnoreCase))
+                return HookResult.Continue;
 
-            ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null, mode);
+            ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null);
             return HookResult.Handled;
         }
 
         // One chat line can reach the toggle twice (chat hook + CS#'s css_ dispatch)
-        private readonly Dictionary<ZeusMode, DateTime> lastToggle = new();
+        private DateTime lastToggle = DateTime.MinValue;
 
-        private void ToggleSuperZeus(CCSPlayerController? player, string? arg, ZeusMode zeusMode)
+        // No argument toggles off <-> 1; "0", "1" or "2" sets the level
+        private void ToggleSuperZeus(CCSPlayerController? player, string? arg)
         {
-            if (lastToggle.TryGetValue(zeusMode, out var last) && (DateTime.UtcNow - last).TotalSeconds < 0.5)
+            if ((DateTime.UtcNow - lastToggle).TotalSeconds < 0.5)
                 return;
-            lastToggle[zeusMode] = DateTime.UtcNow;
-            string mode = $"{zeusMode} Zeus";
+            lastToggle = DateTime.UtcNow;
 
             if (player != null)
             {
@@ -466,62 +450,47 @@ namespace ZeusOnlyMode
                 bool allowed = AdminManager.PlayerHasPermissions(player, SuperZeusPermission);
                 var data = AdminManager.GetPlayerAdminData(player);
                 string flags = data == null ? "no admin data" : string.Join(", ", data.Flags.SelectMany(kv => kv.Value));
-                Logger.LogInformation("[SuperZeus] {Mode} toggle attempt by {Name} ({SteamId}), arg '{Arg}': {Result}; flags: {Flags}",
-                    mode, player.PlayerName, player.SteamID, arg ?? "", allowed ? "allowed" : "DENIED", flags);
+                Logger.LogInformation("[SuperZeus] Toggle attempt by {Name} ({SteamId}), arg '{Arg}': {Result}; flags: {Flags}",
+                    player.PlayerName, player.SteamID, arg ?? "", allowed ? "allowed" : "DENIED", flags);
 
                 if (!allowed)
                 {
-                    player.PrintToChat($" {ChatColors.Red}{mode}:{ChatColors.Default} you need the {SuperZeusPermission} admin flag to toggle it.");
+                    player.PrintToChat($" {ChatColors.Red}Super Zeus:{ChatColors.Default} you need the {SuperZeusPermission} admin flag to toggle it.");
                     return;
                 }
             }
 
-            bool enabled = zeusMode switch
+            int newLevel = arg switch
             {
-                ZeusMode.Hyper => hyperZeusEnabled,
-                ZeusMode.Reflect => reflectZeusEnabled,
-                _ => superZeusEnabled
-            };
-            bool newState = arg switch
-            {
-                "1" => true,
-                "0" => false,
-                _ => !enabled
+                "0" => 0,
+                "1" => 1,
+                "2" => 2,
+                _ => superZeusEnabled ? 0 : 1
             };
 
-            if (newState == enabled)
+            if (newLevel == superZeusLevel)
             {
-                ReplyToAdmin(player, $"{mode} Is Already {(enabled ? "Enabled" : "Disabled")}.");
+                ReplyToAdmin(player, newLevel switch
+                {
+                    0 => "Super Zeus Is Already Disabled.",
+                    1 => "Super Zeus Is Already Enabled.",
+                    _ => "Super Zeus Is Already Enabled With All Fire Modes."
+                });
                 return;
             }
 
-            switch (zeusMode)
-            {
-                case ZeusMode.Hyper: hyperZeusEnabled = newState; break;
-                case ZeusMode.Reflect: reflectZeusEnabled = newState; break;
-                default: superZeusEnabled = newState; break;
-            }
+            superZeusLevel = newLevel;
             SaveSuperZeusState();
-            Logger.LogInformation("[SuperZeus] {Mode} turned {State} by {Who}", mode, newState ? "ON" : "OFF", player?.PlayerName ?? "console");
+            Logger.LogInformation("[SuperZeus] Super Zeus set to level {Level} by {Who}", newLevel, player?.PlayerName ?? "console");
 
-            if (newState)
-            {
-                string pitch = zeusMode switch
-                {
-                    ZeusMode.Hyper => "Right-Click Rapidly With Your Zeus To Unleash Lightning Balls!",
-                    ZeusMode.Reflect => "Lightning Balls Now Bounce Off A Wall Or Floor Once!",
-                    _ => "Right-Click With Your Zeus To Hurl A Lightning Ball!"
-                };
-                Server.PrintToChatAll($" {ChatColors.LightBlue}{mode.ToUpperInvariant()} ENABLED{ChatColors.Default} - {pitch}");
-            }
+            if (newLevel == 2)
+                Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED - ALL FIRE MODES{ChatColors.Default} - Right-Click With Your Zeus To Fire, Inspect To Switch Fire Mode!");
+            else if (newLevel == 1)
+                Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED{ChatColors.Default} - Right-Click With Your Zeus To Hurl A Lightning Ball!");
             else
             {
-                var stillOn = new List<string>();
-                if (superZeusEnabled) stillOn.Add("Super Zeus");
-                if (hyperZeusEnabled) stillOn.Add("Hyper Zeus");
-                if (reflectZeusEnabled) stillOn.Add("Reflect Zeus");
-                string rest = stillOn.Count == 0 ? "" : $" {string.Join(" And ", stillOn)} {(stillOn.Count == 1 ? "Is" : "Are")} Still On.";
-                Server.PrintToChatAll($" {ChatColors.LightBlue}{mode} Disabled.{rest}");
+                Server.PrintToChatAll($" {ChatColors.LightBlue}Super Zeus Disabled.");
+                ClearGrapples();
             }
         }
 
@@ -579,6 +548,7 @@ namespace ZeusOnlyMode
 
                     OnSuperZeusButtons(player, pressed);
                     OnZeusColorButtons(player, pressed);
+                    OnFireModeButtons(player, pressed);
                 }
                 catch (Exception ex)
                 {
@@ -589,7 +559,7 @@ namespace ZeusOnlyMode
 
             // Heartbeat while Super Zeus is on: proves the poll is running and
             // shows whether right-clicks are reaching it at all
-            if (AltFireEnabled && Server.CurrentTime >= nextHeartbeat)
+            if (superZeusEnabled && Server.CurrentTime >= nextHeartbeat)
             {
                 nextHeartbeat = Server.CurrentTime + 15f;
                 Logger.LogInformation("[SuperZeus] Poll alive: {Polled} living players polled, {Clicks} right-clicks seen so far, {Balls} balls in flight",
@@ -637,16 +607,16 @@ namespace ZeusOnlyMode
             var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
             {
-                if (AltFireEnabled)
+                if (superZeusEnabled)
                     Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is holding {Weapon}, not the Zeus",
                         player.PlayerName, weapon != null && weapon.IsValid ? weapon.DesignerName : "nothing");
                 return;
             }
 
             // From here every right-click with the Zeus logs its outcome
-            if (!AltFireEnabled)
+            if (!superZeusEnabled)
             {
-                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but every alt-fire mode is off", player.PlayerName);
+                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus is off", player.PlayerName);
                 return;
             }
 
@@ -663,7 +633,8 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            if (hyperZeusEnabled)
+            var mode = FireModeOf(player);
+            if (mode == FireMode.Hyper)
             {
                 float energy = BallEnergy(zeus.Index, now);
                 if (energy < 1f)
@@ -676,14 +647,21 @@ namespace ZeusOnlyMode
                 ballEnergy[zeus.Index] = (energy - 1f, now);
                 nextBallTime[player.Slot] = now + HyperBallGap;
                 Logger.LogInformation("[SuperZeus] {Name} fired a Hyper Zeus ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, HyperBallsPerCharge);
-                FireLightningBall(player, pawn, zeus, HyperBallDamage, HyperBallSize);
+                FireLightningBall(player, pawn, zeus, HyperBallDamage, HyperBallSize, reflect: false);
                 return;
             }
 
-            Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
             ConsumeZeusCharge(zeus);
-            FireLightningBall(player, pawn, zeus, BallDamage, 1f);
+            if (mode == FireMode.Grapple)
+            {
+                Logger.LogInformation("[SuperZeus] {Name} fired a grapple", player.PlayerName);
+                FireGrapple(player, pawn, zeus);
+                return;
+            }
+
+            Logger.LogInformation("[SuperZeus] {Name} fired a {Mode} ball", player.PlayerName, mode);
+            FireLightningBall(player, pawn, zeus, BallDamage, 1f, reflect: mode == FireMode.Reflect);
         }
 
         // Hyper Zeus balls fire three times as fast as the normal zap: each
@@ -773,7 +751,7 @@ namespace ZeusOnlyMode
             }
         }
 
-        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus, int damage, float size)
+        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus, int damage, float size, bool reflect)
         {
             var eye = ToVec3(pawn.AbsOrigin!) + new Vector3(0, 0, pawn.ViewOffset.Z);
             var angles = new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0);
@@ -781,10 +759,10 @@ namespace ZeusOnlyMode
 
             var spawnPos = eye + forward * 24f;
             var muzzle = eye + forward * 28f + right * (pawn.LeftHanded ? -7f : 7f) - up * 7f;
-            var velocity = forward * (reflectZeusEnabled ? ReflectBallSpeed : BallSpeed);
+            var velocity = forward * (reflect ? ReflectBallSpeed : BallSpeed);
 
             var ball = SpawnBall(pawn, player.Slot, pawn.TeamNum, GetZeusColor(player), spawnPos, velocity,
-                damage, size, BallLifetime, reflectZeusEnabled);
+                damage, size, BallLifetime, reflect);
             if (ball == null)
             {
                 Logger.LogError("[SuperZeus] Could not create the ball's carrier entity; no ball for {Name}", player.PlayerName);
@@ -804,15 +782,13 @@ namespace ZeusOnlyMode
             KickZeus(zeus);
         }
 
-        // A ball and its carrier, flying from spawnPos at velocity. The owner
-        // pawn (if still around) is who the carrier ignores and credits.
-        private LightningBall? SpawnBall(CCSPlayerPawn? ownerPawn, int ownerSlot, byte team, ZeusColorOption? color,
-            Vector3 spawnPos, Vector3 velocity, int damage, float size, float lifetime, bool reflect)
+        // An invisible decoy that carries a ball (or grapple tip) so the engine
+        // handles world collision for us. It ignores the owner pawn, if given.
+        private static CDecoyProjectile? CreateCarrier(CCSPlayerPawn? ownerPawn, byte team, Vector3 spawnPos, Vector3 velocity)
         {
             if (ownerPawn != null && !ownerPawn.IsValid)
                 ownerPawn = null;
 
-            // An invisible decoy carries the ball so the engine handles world collision for us
             var projectile = Utilities.CreateEntityByName<CDecoyProjectile>("decoy_projectile");
             if (projectile == null)
                 return null;
@@ -833,6 +809,17 @@ namespace ZeusOnlyMode
             if (ownerPawn != null) IgnoreOwnerCollision(projectile, ownerPawn);
             projectile.GravityScale = 0.001f;
             projectile.Teleport(spawnPos, Vector3.Zero, velocity);
+            return projectile;
+        }
+
+        // A ball and its carrier, flying from spawnPos at velocity. The owner
+        // pawn (if still around) is who the carrier ignores and credits.
+        private LightningBall? SpawnBall(CCSPlayerPawn? ownerPawn, int ownerSlot, byte team, ZeusColorOption? color,
+            Vector3 spawnPos, Vector3 velocity, int damage, float size, float lifetime, bool reflect)
+        {
+            var projectile = CreateCarrier(ownerPawn, team, spawnPos, velocity);
+            if (projectile == null)
+                return null;
 
             var ball = new LightningBall
             {
@@ -869,9 +856,9 @@ namespace ZeusOnlyMode
                 var tendril = new Tendril { Offsets = TendrilShape(size) };
                 for (int s = 0; s < BallTendrilSegments; s++)
                 {
-                    var glow = CreateBeam(spawnPos, spawnPos, BallTendrilGlowColor(ball), 1.0f * size, 0.4f * size);
+                    var glow = CreateBeam(spawnPos, spawnPos, BallTendrilGlowColor(ball), 0.6f * size, 0.25f * size);
                     if (glow != null) tendril.Glow.Add(HandleOf(glow));
-                    var line = CreateBeam(spawnPos, spawnPos, BallTendrilLineColor(ball), 0.3f * size, 0.1f * size);
+                    var line = CreateBeam(spawnPos, spawnPos, BallTendrilLineColor(ball), 0.2f * size, 0.07f * size);
                     if (line != null) tendril.Line.Add(HandleOf(line));
                 }
                 ball.Tendrils.Add(tendril);
@@ -946,6 +933,9 @@ namespace ZeusOnlyMode
 
             if (bodyFades.Count > 0)
                 UpdateBodyFades();
+
+            if (grapples.Count > 0)
+                UpdateGrapples();
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
@@ -1765,12 +1755,12 @@ namespace ZeusOnlyMode
         // A jagged arc reaching out from the ball, as offsets from its center
         private Vector3[] TendrilShape(float size)
         {
-            var tip = RandomUnit() * (22f + rng.NextSingle() * 20f) * size;
+            var tip = RandomUnit() * (11f + rng.NextSingle() * 10f) * size;
             var points = new Vector3[BallTendrilSegments + 1];
             for (int i = 0; i <= BallTendrilSegments; i++)
             {
                 float t = i / (float)BallTendrilSegments;
-                var jitter = i == 0 || i == BallTendrilSegments ? Vector3.Zero : RandomUnit() * 6f * size * MathF.Sin(t * MathF.PI);
+                var jitter = i == 0 || i == BallTendrilSegments ? Vector3.Zero : RandomUnit() * 3f * size * MathF.Sin(t * MathF.PI);
                 points[i] = tip * t + jitter;
             }
             return points;
