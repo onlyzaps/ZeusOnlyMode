@@ -74,7 +74,7 @@ namespace ZeusOnlyMode
 
         // What this player's alt-fire does right now
         private FireMode FireModeOf(CCSPlayerController player) =>
-            AllFireModes && !player.IsBot && fireModes.TryGetValue(player.SteamID, out var mode) ? mode : FireMode.Super;
+            AllFireModes && !player.IsBot && fireModes.TryGetValue(player.SteamID, out var mode) && ModeAllowed(mode) ? mode : FireMode.Super;
 
         private void OnFireModeButtons(CCSPlayerController player, PlayerButtons pressed)
         {
@@ -87,7 +87,15 @@ namespace ZeusOnlyMode
 
             var current = fireModes.TryGetValue(player.SteamID, out var mode) ? mode : FireMode.Super;
             int index = Array.FindIndex(FireModes, f => f.Mode == current);
-            var next = FireModes[(index + 1) % FireModes.Length];
+            FireModeInfo? next = null;
+            for (int step = 1; step <= FireModes.Length && next == null; step++)
+            {
+                var candidate = FireModes[(index + step) % FireModes.Length];
+                if (ModeAllowed(candidate.Mode))
+                    next = candidate;
+            }
+            if (next == null)
+                return;
 
             StopCameraView(player.Slot);   // right-click wouldn't bring them back in another mode
             fireModes[player.SteamID] = next.Mode;

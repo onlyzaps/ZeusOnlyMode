@@ -395,7 +395,7 @@ namespace ZeusOnlyMode
         // null = the player never picked one (or picked Default).
         private ZeusColorOption? GetZeusColor(CCSPlayerController? player)
         {
-            if (player == null || !player.IsValid || player.IsBot)
+            if (!zeusColorsEnabled || player == null || !player.IsValid || player.IsBot)
                 return null;
 
             if (!zeusColorPrefs.TryGetValue(player.SteamID, out var prefs))
@@ -437,7 +437,7 @@ namespace ZeusOnlyMode
         {
             bool next = (pressed & PlayerButtons.Reload) != 0;
             bool back = (pressed & PlayerButtons.Inspect) != 0 && !AllFireModes;
-            if ((!next && !back) || player == null || !player.IsValid || player.IsBot)
+            if ((!next && !back) || !zeusColorsEnabled || player == null || !player.IsValid || player.IsBot)
                 return;
 
             var weapon = player.PlayerPawn.Value?.WeaponServices?.ActiveWeapon.Value;

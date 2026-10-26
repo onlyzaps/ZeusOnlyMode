@@ -80,6 +80,7 @@ namespace ZeusOnlyMode
 
             LoadSuperZeus();
             LoadZeusColors();
+            LoadAdminPanel();
         }
         private HookResult OnMapEnd(EventGameEnd ev, GameEventInfo info)
         {
@@ -120,6 +121,15 @@ namespace ZeusOnlyMode
                 player?.PrintToChat($"Zeus Mode Is Already {(zeusOnlyEnabled ? "Enabled" : "Disabled")}.");
                 return;
             }
+
+            SetZeusOnlyMode(newState);
+        }
+
+        // Shared by css_zeus_mode and the admin panel
+        private void SetZeusOnlyMode(bool newState)
+        {
+            if (newState == zeusOnlyEnabled)
+                return;
 
             zeusOnlyEnabled = newState;
 

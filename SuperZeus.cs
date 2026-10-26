@@ -364,6 +364,8 @@ namespace ZeusOnlyMode
             RegisterListener<Listeners.OnClientDisconnect>(slot =>
             {
                 lastButtons.Remove(slot);
+                adminPanels.Remove(slot);
+                adminHolds.Remove(slot);
                 noFallDamageUntil.Remove(slot);
                 RemoveSensors(slot);
             });
@@ -478,9 +480,15 @@ namespace ZeusOnlyMode
                 return;
             }
 
+            SetSuperZeusLevel(newLevel, player?.PlayerName ?? "console");
+        }
+
+        // Shared by the command and the admin panel
+        private void SetSuperZeusLevel(int newLevel, string who)
+        {
             superZeusLevel = newLevel;
             SaveSuperZeusState();
-            Logger.LogInformation("[SuperZeus] Super Zeus set to level {Level} by {Who}", newLevel, player?.PlayerName ?? "console");
+            Logger.LogInformation("[SuperZeus] Super Zeus set to level {Level} by {Who}", newLevel, who);
 
             if (newLevel == 2)
                 Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED - ALL FIRE MODES{ChatColors.Default} - Right-Click With Your Zeus To Fire, Inspect To Switch Fire Mode!");
@@ -538,11 +546,20 @@ namespace ZeusOnlyMode
                     lastButtons.TryGetValue(player.Slot, out var previous);
                     lastButtons[player.Slot] = buttons;
 
+                    bool panelOpen = HandleAdminPanelButtons(player, buttons, previous);
+
                     var pressed = buttons & ~previous;
                     if (pressed == 0)
                         continue;
 
                     OnSuperZeusButtons(player, pressed);
+
+                    // Reload and Inspect belong to the admin panel while it is open, and
+                    // pressing them together is the panel's own hold, not a color or mode step
+                    bool together = (buttons & (PlayerButtons.Reload | PlayerButtons.Inspect)) == (PlayerButtons.Reload | PlayerButtons.Inspect);
+                    if (panelOpen || together)
+                        continue;
+
                     OnZeusColorButtons(player, pressed);
                     OnFireModeButtons(player, pressed);
                 }

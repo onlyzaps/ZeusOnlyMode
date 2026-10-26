@@ -56,6 +56,14 @@ not need to be on to color your zap.
 
 A colored zap is drawn over the stock zap. A colored lightning ball is drawn with colored rays, a tail and sparks.
 
+Admin Panel
+-----------
+An admin (@css/generic) who holds Inspect (F) and Reload (R) together for two seconds gets a center panel of checkboxes that turn
+features on or off for every player: Zeus Only Mode, Super Zeus, All Fire Modes (superzeus 2), each of Hyper Zeus, Reflect Zeus,
+Grapple, Camera and Sensor Probe, and Zeus Colors. While it is open, tap Reload (R) to move down and Inspect (F) to tick or untick the
+highlighted row; hold F and R together for two seconds again to close it. Each change is announced in chat. Fire mode and color
+choices are saved in addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/admin_features.json.
+
 Settings live in addons/counterstrikesharp/configs/plugins/ZeusOnlyMode/settings.json (created on
 first load): SoundVolume (0 to 1, default 0.4) sets the volume of every sound the plugin plays.
 It is re-read whenever the plugin loads, so edit it and reload the plugin to apply a change.
