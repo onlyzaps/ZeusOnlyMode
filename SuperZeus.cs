@@ -53,7 +53,10 @@ namespace ZeusOnlyMode
         // Damage per lightning ball hit (a little over a third of full health);
         // Hyper Zeus fires much faster, so each of its balls hits for less
         private const int BallDamage = 34;
-        private const int HyperBallDamage = 10;
+        private const int HyperBallDamage = 20;
+
+        // Hyper Zeus balls are drawn (and hit) at this fraction of a Super Zeus ball's size
+        private const float HyperBallSize = 0.6f;
 
         // All effects below exist in CS2's pak01 and only rely on control point 0,
         // so they render correctly from a plain info_particle_system.
@@ -132,6 +135,7 @@ namespace ZeusOnlyMode
             public required Vector3 LastPosition;
             public required float ExpireTime;
             public required int Damage;
+            public required float Size;   // 1 = a Super Zeus ball
             public int Age;
         }
 
@@ -628,14 +632,14 @@ namespace ZeusOnlyMode
                 ballEnergy[zeus.Index] = (energy - 1f, now);
                 nextBallTime[player.Slot] = now + HyperBallGap;
                 Logger.LogInformation("[SuperZeus] {Name} fired a Hyper Zeus ball (energy {Energy:0.00}/{Max})", player.PlayerName, energy - 1f, HyperBallsPerCharge);
-                FireLightningBall(player, pawn, zeus, HyperBallDamage);
+                FireLightningBall(player, pawn, zeus, HyperBallDamage, HyperBallSize);
                 return;
             }
 
             Logger.LogInformation("[SuperZeus] {Name} fired a lightning ball", player.PlayerName);
             nextBallTime[player.Slot] = now + BallCooldown;
             ConsumeZeusCharge(zeus);
-            FireLightningBall(player, pawn, zeus, BallDamage);
+            FireLightningBall(player, pawn, zeus, BallDamage, 1f);
         }
 
         // Hyper Zeus balls fire three times as fast as the normal zap: each
@@ -725,7 +729,7 @@ namespace ZeusOnlyMode
             }
         }
 
-        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus, int damage)
+        private void FireLightningBall(CCSPlayerController player, CCSPlayerPawn pawn, CCSWeaponBase zeus, int damage, float size)
         {
             var eye = ToVec3(pawn.AbsOrigin!) + new Vector3(0, 0, pawn.ViewOffset.Z);
             var angles = new Vector3(pawn.EyeAngles.X, pawn.EyeAngles.Y, 0);
@@ -766,7 +770,8 @@ namespace ZeusOnlyMode
                 Velocity = velocity,
                 LastPosition = spawnPos,
                 ExpireTime = Server.CurrentTime + BallLifetime,
-                Damage = damage
+                Damage = damage,
+                Size = size
             };
 
             // A small BFG-style ball in the player's color (stock blue on
@@ -775,30 +780,30 @@ namespace ZeusOnlyMode
             // white-blue and can't be recolored, so the ball is built from beams.
             for (int i = 0; i < BallGlowWedges; i++)
             {
-                var wedge = CreateBeam(spawnPos, spawnPos, BallGlowColor(ball), BallGlowWidth, 0.05f);
+                var wedge = CreateBeam(spawnPos, spawnPos, BallGlowColor(ball), BallGlowWidth * size, 0.05f);
                 if (wedge != null) ball.Glow.Add(HandleOf(wedge));
             }
 
             for (int i = 0; i < BallCoreWedges; i++)
             {
-                var wedge = CreateBeam(spawnPos, spawnPos, BallCoreColor(ball), BallCoreWidth, 0.05f);
+                var wedge = CreateBeam(spawnPos, spawnPos, BallCoreColor(ball), BallCoreWidth * size, 0.05f);
                 if (wedge != null) ball.Core.Add(HandleOf(wedge));
             }
 
             for (int t = 0; t < BallTendrils; t++)
             {
-                var tendril = new Tendril { Offsets = TendrilShape() };
+                var tendril = new Tendril { Offsets = TendrilShape(size) };
                 for (int s = 0; s < BallTendrilSegments; s++)
                 {
-                    var glow = CreateBeam(spawnPos, spawnPos, BallTendrilGlowColor(ball), 1.0f, 0.4f);
+                    var glow = CreateBeam(spawnPos, spawnPos, BallTendrilGlowColor(ball), 1.0f * size, 0.4f * size);
                     if (glow != null) tendril.Glow.Add(HandleOf(glow));
-                    var line = CreateBeam(spawnPos, spawnPos, BallTendrilLineColor(ball), 0.3f, 0.1f);
+                    var line = CreateBeam(spawnPos, spawnPos, BallTendrilLineColor(ball), 0.3f * size, 0.1f * size);
                     if (line != null) tendril.Line.Add(HandleOf(line));
                 }
                 ball.Tendrils.Add(tendril);
             }
 
-            var tail = CreateBeam(spawnPos, spawnPos, Scale(BoltGlowColor(ball.Color), 0.6f), 0.5f, 0.05f);
+            var tail = CreateBeam(spawnPos, spawnPos, Scale(BoltGlowColor(ball.Color), 0.6f), 0.5f * size, 0.05f);
             if (tail != null) ball.Tail = HandleOf(tail);
 
             lightningBalls.Add(ball);
@@ -988,10 +993,10 @@ namespace ZeusOnlyMode
 
         // Any living player (other than the shooter) whose body the ball's
         // center orb touched along this tick's path. The body is a capsule the
-        // size of the player hull; the orb is a sphere of BallOrbRadius.
+        // size of the player hull; the orb is a sphere of BallOrbRadius (times the ball's size).
         private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to)
         {
-            const float reach = BallOrbRadius + PlayerHullRadius;
+            float reach = BallOrbRadius * ball.Size + PlayerHullRadius;
 
             foreach (var player in Utilities.GetPlayers())
             {
@@ -1619,14 +1624,14 @@ namespace ZeusOnlyMode
         private static Color BallTendrilLineColor(LightningBall ball) => Whiten(BoltGlowColor(ball.Color), 0.4f);
 
         // A jagged arc reaching out from the ball, as offsets from its center
-        private Vector3[] TendrilShape()
+        private Vector3[] TendrilShape(float size)
         {
-            var tip = RandomUnit() * (22f + rng.NextSingle() * 20f);
+            var tip = RandomUnit() * (22f + rng.NextSingle() * 20f) * size;
             var points = new Vector3[BallTendrilSegments + 1];
             for (int i = 0; i <= BallTendrilSegments; i++)
             {
                 float t = i / (float)BallTendrilSegments;
-                var jitter = i == 0 || i == BallTendrilSegments ? Vector3.Zero : RandomUnit() * 6f * MathF.Sin(t * MathF.PI);
+                var jitter = i == 0 || i == BallTendrilSegments ? Vector3.Zero : RandomUnit() * 6f * size * MathF.Sin(t * MathF.PI);
                 points[i] = tip * t + jitter;
             }
             return points;
@@ -1640,7 +1645,7 @@ namespace ZeusOnlyMode
                 var wedge = handle.Value;
                 if (wedge == null || !wedge.IsValid) continue;
                 wedge.Teleport(pos, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(wedge, pos + RandomUnit() * BallGlowRadius * (0.8f + rng.NextSingle() * 0.3f), true);
+                SetBeamEnd(wedge, pos + RandomUnit() * BallGlowRadius * ball.Size * (0.8f + rng.NextSingle() * 0.3f), true);
             }
 
             foreach (var handle in ball.Core)
@@ -1648,14 +1653,14 @@ namespace ZeusOnlyMode
                 var wedge = handle.Value;
                 if (wedge == null || !wedge.IsValid) continue;
                 wedge.Teleport(pos, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(wedge, pos + RandomUnit() * BallCoreRadius, true);
+                SetBeamEnd(wedge, pos + RandomUnit() * BallCoreRadius * ball.Size, true);
             }
 
             // Tendrils re-strike at random and otherwise ride along with the ball
             foreach (var tendril in ball.Tendrils)
             {
                 if (rng.NextSingle() < 0.35f)
-                    tendril.Offsets = TendrilShape();
+                    tendril.Offsets = TendrilShape(ball.Size);
 
                 for (int s = 0; s < BallTendrilSegments; s++)
                 {
@@ -1670,7 +1675,7 @@ namespace ZeusOnlyMode
             if (tail != null && tail.IsValid)
             {
                 tail.Teleport(pos, Vector3.Zero, Vector3.Zero);
-                SetBeamEnd(tail, pos - Vector3.Normalize(ball.Velocity) * 48f, true);
+                SetBeamEnd(tail, pos - Vector3.Normalize(ball.Velocity) * 48f * ball.Size, true);
             }
 
             // A few sparks shed as it flies
