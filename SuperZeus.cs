@@ -95,7 +95,10 @@ namespace ZeusOnlyMode
 
         private bool superZeusEnabled = false;
         private bool hyperZeusEnabled = false;   // fast alt-fire: a three-ball pool per charge
-        private bool BallsEnabled => superZeusEnabled || hyperZeusEnabled;
+        private bool chickenZeusEnabled = false; // alt-fire hurls chickens (ChickenZeus.cs)
+        private bool AltFireEnabled => superZeusEnabled || hyperZeusEnabled || chickenZeusEnabled;
+
+        private enum ZeusMode { Super, Hyper, Chicken }
         private readonly Random rng = new();
         private readonly List<LightningBall> lightningBalls = new();
         private readonly Dictionary<int, float> nextBallTime = new();
@@ -155,8 +158,9 @@ namespace ZeusOnlyMode
                 using var doc = JsonDocument.Parse(File.ReadAllText(superZeusStatePath));
                 superZeusEnabled = doc.RootElement.TryGetProperty("enabled", out var enabled) && enabled.GetBoolean();
                 hyperZeusEnabled = doc.RootElement.TryGetProperty("hyper", out var hyper) && hyper.GetBoolean();
-                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}, Hyper Zeus is {Hyper}",
-                    superZeusEnabled ? "ON" : "OFF", hyperZeusEnabled ? "ON" : "OFF");
+                chickenZeusEnabled = doc.RootElement.TryGetProperty("chicken", out var chicken) && chicken.GetBoolean();
+                Logger.LogInformation("[SuperZeus] Restored saved state: Super Zeus is {State}, Hyper Zeus is {Hyper}, Chicken Zeus is {Chicken}",
+                    superZeusEnabled ? "ON" : "OFF", hyperZeusEnabled ? "ON" : "OFF", chickenZeusEnabled ? "ON" : "OFF");
             }
             catch (Exception ex)
             {
@@ -169,7 +173,7 @@ namespace ZeusOnlyMode
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(superZeusStatePath)!);
-                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, hyper = hyperZeusEnabled }));
+                File.WriteAllText(superZeusStatePath, JsonSerializer.Serialize(new { enabled = superZeusEnabled, hyper = hyperZeusEnabled, chicken = chickenZeusEnabled }));
             }
             catch (Exception ex)
             {
@@ -186,21 +190,25 @@ namespace ZeusOnlyMode
                 if (!File.Exists(path))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    File.WriteAllText(path, JsonSerializer.Serialize(new { SoundVolume = DefaultSoundVolume }, new JsonSerializerOptions { WriteIndented = true }));
+                    File.WriteAllText(path, JsonSerializer.Serialize(new { SoundVolume = DefaultSoundVolume, ChickenSoundVolume = DefaultChickenSoundVolume }, new JsonSerializerOptions { WriteIndented = true }));
                 }
 
                 using var doc = JsonDocument.Parse(File.ReadAllText(path));
                 SoundVolume = doc.RootElement.TryGetProperty("SoundVolume", out var volume) && volume.TryGetSingle(out var value)
                     ? Math.Clamp(value, 0f, 1f)
                     : DefaultSoundVolume;
+                ChickenSoundVolume = doc.RootElement.TryGetProperty("ChickenSoundVolume", out var chickenVolume) && chickenVolume.TryGetSingle(out var chickenValue)
+                    ? Math.Clamp(chickenValue, 0f, 1f)
+                    : DefaultChickenSoundVolume;
             }
             catch (Exception ex)
             {
                 SoundVolume = DefaultSoundVolume;
+                ChickenSoundVolume = DefaultChickenSoundVolume;
                 Logger.LogError("Could not read {Path}: {Message}", path, ex.Message);
             }
 
-            Logger.LogInformation("[SuperZeus] Sound volume {Volume} (settings.json)", SoundVolume);
+            Logger.LogInformation("[SuperZeus] Sound volume {Volume}, chicken sound volume {Chicken} (settings.json)", SoundVolume, ChickenSoundVolume);
         }
 
         // --- Sound volume -------------------------------------------------------
@@ -217,55 +225,66 @@ namespace ZeusOnlyMode
         private const int SosStartSoundEventId = 208;
         private const int SosSetSoundEventParamsId = 210;
         private const uint VolumeParamHash = 0xBD6054E9;   // "public.volume"
-        private string? emittingSound;                       // set while PlaySound emits
-        private readonly Dictionary<uint, string> recentSounds = new();
+        private (string Sound, float Volume)? emittingSound;   // set while PlaySound emits
+        private readonly Dictionary<uint, (string Sound, float Volume)> recentSounds = new();
         private int soundLogsLeft;
 
-        private void PlaySound(CBaseEntity? source, string sound)
+        // volume: null = SoundVolume
+        private void PlaySound(CBaseEntity? source, string sound, float? volume = null)
         {
             if (source == null || !source.IsValid)
                 return;
 
+            float level = volume ?? SoundVolume;
             var recipients = new RecipientFilter();
             recipients.AddAllPlayers();
             uint guid;
-            emittingSound = sound;
-            try { guid = source.EmitSound(sound, recipients, SoundVolume); }
+            emittingSound = (sound, level);
+            try { guid = source.EmitSound(sound, recipients, level); }
             finally { emittingSound = null; }
-            if (guid == 0 || SoundVolume >= 1f)
+            if (guid == 0 || level >= 1f)
                 return;
 
             // In case the start message goes out after EmitSound returns
-            recentSounds[guid] = sound;
+            recentSounds[guid] = (sound, level);
             Server.NextFrame(() =>
             {
                 recentSounds.Remove(guid);
-                SendSoundVolume(guid, recipients, sound);
+                SendSoundVolume(guid, recipients, sound, level);
             });
-            SendSoundVolume(guid, recipients, sound);
+            SendSoundVolume(guid, recipients, sound, level);
         }
 
         private HookResult OnSosStartSoundEvent(UserMessage message)
         {
-            if (SoundVolume >= 1f)
-                return HookResult.Continue;
-
             try
             {
                 uint guid = message.ReadUInt("soundevent_guid");
-                string? sound = emittingSound;
-                if (sound == null && !recentSounds.TryGetValue(guid, out sound))
+                bool during = emittingSound != null;
+                (string Sound, float Volume) played;
+                if (emittingSound is { } current)
+                    played = current;
+                else if (!recentSounds.TryGetValue(guid, out played))
+                {
+                    // A chicken's own clucks and flaps, while it's one of ours
+                    if (chickenIndexes.Count == 0 || !chickenIndexes.Contains(message.ReadInt("source_entity_index")))
+                        return HookResult.Continue;
+                    played = ("chicken sound", ChickenSoundVolume);
+                }
+
+                string sound = played.Sound;
+                if (played.Volume >= 1f)
                     return HookResult.Continue;
 
                 byte[] before = message.ReadBytes("packed_params");
-                byte[] after = WithVolume(before, SoundVolume);
+                byte[] after = WithVolume(before, played.Volume);
                 message.SetBytes("packed_params", after);
 
                 if (soundLogsLeft > 0)
                 {
                     soundLogsLeft--;
                     Logger.LogInformation("[SuperZeus] {Sound} start (guid {Guid}, {When}): params {Before} -> {After}",
-                        sound, guid, emittingSound != null ? "during EmitSound" : "after EmitSound",
+                        sound, guid, during ? "during EmitSound" : "after EmitSound",
                         before.Length == 0 ? "(none)" : Convert.ToHexString(before), Convert.ToHexString(after));
                 }
             }
@@ -311,13 +330,13 @@ namespace ZeusOnlyMode
             return bytes;
         }
 
-        private void SendSoundVolume(uint guid, RecipientFilter recipients, string sound)
+        private void SendSoundVolume(uint guid, RecipientFilter recipients, string sound, float volume)
         {
             try
             {
                 using var message = UserMessage.FromId(SosSetSoundEventParamsId);
                 message.SetUInt("soundevent_guid", guid);
-                message.SetBytes("packed_params", VolumeParam(SoundVolume));
+                message.SetBytes("packed_params", VolumeParam(volume));
                 message.Send(recipients);
             }
             catch (Exception ex)
@@ -339,6 +358,7 @@ namespace ZeusOnlyMode
             // makes that a single toggle.
             AddCommand("superzeus", "Toggle Super Zeus (alt-fire lightning balls)", ConCommand_SuperZeus);
             AddCommand("hyperzeus", "Toggle Hyper Zeus (rapid alt-fire lightning balls)", ConCommand_HyperZeus);
+            AddCommand("chicken", "Toggle Chicken Zeus (alt-fire hurls chickens)", ConCommand_ChickenZeus);
 
 
             // Handle the chat form ourselves so the message is swallowed and never shown to players
@@ -366,6 +386,9 @@ namespace ZeusOnlyMode
                 ballSparks.Clear();
                 pendingRecharges.Clear();
                 ballEnergy.Clear();
+                flyingChickens.Clear();
+                landedChickens.Clear();
+                chickenIndexes.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
                 bodyFades.Clear();
@@ -382,6 +405,7 @@ namespace ZeusOnlyMode
             RegisterEventHandler<EventRoundStart>((ev, info) =>
             {
                 ClearLightningBalls();
+                ClearChickens();
                 return HookResult.Continue;
             });
         }
@@ -390,6 +414,7 @@ namespace ZeusOnlyMode
         {
             UnhookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
             ClearLightningBalls();
+            ClearChickens();
         }
 
         // css_superzeus: registered by attribute, exactly like other plugins'
@@ -398,14 +423,21 @@ namespace ZeusOnlyMode
         public void ConCommand_SuperZeus(CCSPlayerController? player, CommandInfo info)
         {
             Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null);
+            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Super);
         }
 
         [ConsoleCommand("css_hyperzeus", "Toggle Hyper Zeus (rapid alt-fire lightning balls)")]
         public void ConCommand_HyperZeus(CCSPlayerController? player, CommandInfo info)
         {
             Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
-            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, hyper: true);
+            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Hyper);
+        }
+
+        [ConsoleCommand("css_chicken", "Toggle Chicken Zeus (alt-fire hurls chickens)")]
+        public void ConCommand_ChickenZeus(CCSPlayerController? player, CommandInfo info)
+        {
+            Logger.LogInformation("[SuperZeus] Command {Command} from {Who}", info.GetArg(0), player?.PlayerName ?? "console");
+            ToggleSuperZeus(player, info.ArgCount > 1 ? info.GetArg(1) : null, ZeusMode.Chicken);
         }
 
         private HookResult OnSuperZeusChat(CCSPlayerController? player, CommandInfo info)
@@ -416,25 +448,25 @@ namespace ZeusOnlyMode
 
             string word = parts[0].TrimStart('!', '/');
 
-            bool hyper = word.Equals("hyperzeus", StringComparison.OrdinalIgnoreCase);
-            if (!hyper && !word.Equals("superzeus", StringComparison.OrdinalIgnoreCase))
-                return HookResult.Continue;
+            ZeusMode mode;
+            if (word.Equals("superzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Super;
+            else if (word.Equals("hyperzeus", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Hyper;
+            else if (word.Equals("chicken", StringComparison.OrdinalIgnoreCase)) mode = ZeusMode.Chicken;
+            else return HookResult.Continue;
 
-            ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null, hyper);
+            ToggleSuperZeus(player, parts.Length > 1 ? parts[1] : null, mode);
             return HookResult.Handled;
         }
 
         // One chat line can reach the toggle twice (chat hook + CS#'s css_ dispatch)
-        private DateTime lastToggle = DateTime.MinValue;
-        private DateTime lastHyperToggle = DateTime.MinValue;
+        private readonly Dictionary<ZeusMode, DateTime> lastToggle = new();
 
-        private void ToggleSuperZeus(CCSPlayerController? player, string? arg, bool hyper = false)
+        private void ToggleSuperZeus(CCSPlayerController? player, string? arg, ZeusMode zeusMode)
         {
-            ref DateTime last = ref hyper ? ref lastHyperToggle : ref lastToggle;
-            if ((DateTime.UtcNow - last).TotalSeconds < 0.5)
+            if (lastToggle.TryGetValue(zeusMode, out var last) && (DateTime.UtcNow - last).TotalSeconds < 0.5)
                 return;
-            last = DateTime.UtcNow;
-            string mode = hyper ? "Hyper Zeus" : "Super Zeus";
+            lastToggle[zeusMode] = DateTime.UtcNow;
+            string mode = $"{zeusMode} Zeus";
 
             if (player != null)
             {
@@ -453,7 +485,12 @@ namespace ZeusOnlyMode
                 }
             }
 
-            ref bool enabled = ref hyper ? ref hyperZeusEnabled : ref superZeusEnabled;
+            bool enabled = zeusMode switch
+            {
+                ZeusMode.Hyper => hyperZeusEnabled,
+                ZeusMode.Chicken => chickenZeusEnabled,
+                _ => superZeusEnabled
+            };
             bool newState = arg switch
             {
                 "1" => true,
@@ -467,18 +504,34 @@ namespace ZeusOnlyMode
                 return;
             }
 
-            enabled = newState;
+            switch (zeusMode)
+            {
+                case ZeusMode.Hyper: hyperZeusEnabled = newState; break;
+                case ZeusMode.Chicken: chickenZeusEnabled = newState; break;
+                default: superZeusEnabled = newState; break;
+            }
             SaveSuperZeusState();
             Logger.LogInformation("[SuperZeus] {Mode} turned {State} by {Who}", mode, newState ? "ON" : "OFF", player?.PlayerName ?? "console");
 
-            if (hyper && newState)
-                Server.PrintToChatAll($" {ChatColors.LightBlue}HYPER ZEUS ENABLED{ChatColors.Default} - Right-Click Rapidly With Your Zeus To Unleash Lightning Balls!");
-            else if (hyper)
-                Server.PrintToChatAll($" {ChatColors.LightBlue}Hyper Zeus Disabled.{(superZeusEnabled ? " Super Zeus Is Still On." : "")}");
-            else if (newState)
-                Server.PrintToChatAll($" {ChatColors.LightBlue}SUPER ZEUS ENABLED{ChatColors.Default} - Right-Click With Your Zeus To Hurl A Lightning Ball!");
+            if (newState)
+            {
+                string pitch = zeusMode switch
+                {
+                    ZeusMode.Hyper => "Right-Click Rapidly With Your Zeus To Unleash Lightning Balls!",
+                    ZeusMode.Chicken => "Right-Click With Your Zeus To Hurl Chickens!",
+                    _ => "Right-Click With Your Zeus To Hurl A Lightning Ball!"
+                };
+                Server.PrintToChatAll($" {ChatColors.LightBlue}{mode.ToUpperInvariant()} ENABLED{ChatColors.Default} - {pitch}");
+            }
             else
-                Server.PrintToChatAll($" {ChatColors.LightBlue}Super Zeus Disabled.{(hyperZeusEnabled ? " Hyper Zeus Is Still On." : "")}");
+            {
+                var stillOn = new List<string>();
+                if (superZeusEnabled) stillOn.Add("Super Zeus");
+                if (hyperZeusEnabled) stillOn.Add("Hyper Zeus");
+                if (chickenZeusEnabled) stillOn.Add("Chicken Zeus");
+                string rest = stillOn.Count == 0 ? "" : $" {string.Join(" And ", stillOn)} {(stillOn.Count == 1 ? "Is" : "Are")} Still On.";
+                Server.PrintToChatAll($" {ChatColors.LightBlue}{mode} Disabled.{rest}");
+            }
         }
 
         private static void ReplyToAdmin(CCSPlayerController? player, string message)
@@ -545,7 +598,7 @@ namespace ZeusOnlyMode
 
             // Heartbeat while Super Zeus is on: proves the poll is running and
             // shows whether right-clicks are reaching it at all
-            if (BallsEnabled && Server.CurrentTime >= nextHeartbeat)
+            if (AltFireEnabled && Server.CurrentTime >= nextHeartbeat)
             {
                 nextHeartbeat = Server.CurrentTime + 15f;
                 Logger.LogInformation("[SuperZeus] Poll alive: {Polled} living players polled, {Clicks} right-clicks seen so far, {Balls} balls in flight",
@@ -593,22 +646,29 @@ namespace ZeusOnlyMode
             var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
             {
-                if (BallsEnabled)
+                if (AltFireEnabled)
                     Logger.LogInformation("[SuperZeus] Right-click ignored: {Name} is holding {Weapon}, not the Zeus",
                         player.PlayerName, weapon != null && weapon.IsValid ? weapon.DesignerName : "nothing");
                 return;
             }
 
             // From here every right-click with the Zeus logs its outcome
-            if (!BallsEnabled)
+            if (!AltFireEnabled)
             {
-                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus and Hyper Zeus are off", player.PlayerName);
+                Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but every alt-fire mode is off", player.PlayerName);
                 return;
             }
 
             float now = Server.CurrentTime;
             if (nextBallTime.TryGetValue(player.Slot, out var readyAt) && now < readyAt)
                 return;
+
+            if (chickenZeusEnabled)
+            {
+                nextBallTime[player.Slot] = now + ChickenCooldown;
+                FireChicken(player, pawn, weapon.As<CCSWeaponBase>());
+                return;
+            }
 
             // Same energy as a normal zap: no charge, no ball
             var zeus = weapon.As<CWeaponTaser>();
@@ -878,6 +938,9 @@ namespace ZeusOnlyMode
             if (bodyFades.Count > 0)
                 UpdateBodyFades();
 
+            if (flyingChickens.Count > 0)
+                UpdateChickens();
+
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
                 bool alive;
@@ -994,13 +1057,16 @@ namespace ZeusOnlyMode
         // Any living player (other than the shooter) whose body the ball's
         // center orb touched along this tick's path. The body is a capsule the
         // size of the player hull; the orb is a sphere of BallOrbRadius (times the ball's size).
-        private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to)
+        private CCSPlayerController? FindHitPlayer(LightningBall ball, Vector3 from, Vector3 to) =>
+            FindHitPlayer(ball.OwnerSlot, BallOrbRadius * ball.Size, from, to);
+
+        private static CCSPlayerController? FindHitPlayer(int ownerSlot, float radius, Vector3 from, Vector3 to)
         {
-            float reach = BallOrbRadius * ball.Size + PlayerHullRadius;
+            float reach = radius + PlayerHullRadius;
 
             foreach (var player in Utilities.GetPlayers())
             {
-                if (player == null || !player.IsValid || !player.PawnIsAlive || player.Slot == ball.OwnerSlot)
+                if (player == null || !player.IsValid || !player.PawnIsAlive || player.Slot == ownerSlot)
                     continue;
 
                 var pawn = player.PlayerPawn.Value;

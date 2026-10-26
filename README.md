@@ -25,6 +25,10 @@ Hyper Zeus (hyperzeus / css_hyperzeus in console, !hyperzeus / /hyperzeus in cha
 balls are smaller, hit for 20 damage instead of 34, and fire three times as fast as the normal zap, from a three-ball energy pool that refills over mp_taser_recharge_time, and a normal zap empties the pool.
 It works on its own or alongside Super Zeus, and is also remembered across map changes and reloads.
 
+Chicken Zeus (chicken / css_chicken in console, !chicken / /chicken in chat, same admin flag, 1 or 0 to force it) makes right-click hurl live chickens
+(one every 0.25 seconds, no charge needed). Each flies at a random angle, tumbling, and lands as a normal chicken where it hits; an enemy it hits takes 15 damage and a shove.
+It takes priority over Super and Hyper Zeus while on. Chicken sounds play at ChickenSoundVolume in settings.json (default 0.2).
+
 Zeus Colors
 -----------
 Any player can pick one color for both their Zeus zap and their lightning ball: Red, Orange,
