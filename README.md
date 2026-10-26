@@ -36,7 +36,8 @@ Fire modes (right-click with the Zeus):
 - Camera: shoots a little webcam onto a wall (one per life; a shot that hits nothing can be taken again). After that, right-click
   switches your view to the camera and back; it starts looking back the way it was shot and pans with W/A/S/D (you stand still while
   watching, framed by a green border with a flashing REC). Its light
-  turns red while you watch, and it goes away when you die.
+  turns red while you watch, and it goes away when you die. One bullet, zap or lightning ball breaks it, kicking out whoever
+  is watching.
 - Sensor Probe: shoots a probe that sticks into the ground (or whatever it hits) and flashes blue. When an enemy comes within
   about 160 units it flashes red, and your team hears an alarm and gets a chat line saying where. One probe per round (a shot that
   hits nothing can be taken again); it lasts until the round ends, even if you die.

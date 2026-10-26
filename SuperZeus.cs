@@ -952,6 +952,17 @@ namespace ZeusOnlyMode
 
             var pos = ToVec3(projectile.AbsOrigin);
 
+            if (wallCameras.Count > 0)
+            {
+                int camera = FindHitCamera(ball.LastPosition, pos + ball.Velocity * BallTickLookahead, BallOrbRadius * ball.Size);
+                if (camera >= 0)
+                {
+                    BreakCamera(camera);
+                    WallBurst(pos);
+                    return false;
+                }
+            }
+
             var hit = FindHitPlayer(ball, ball.LastPosition, pos + ball.Velocity * BallTickLookahead);
             if (hit != null)
             {

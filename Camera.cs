@@ -12,7 +12,8 @@ namespace ZeusOnlyMode
         // ------------------------------------------------------------------
         // Camera fire mode: right-click shoots a little webcam onto a wall
         // (one per life; a shot that hits nothing is refunded). After that,
-        // right-click switches the player's view to the camera and back. The
+        // right-click switches the player's view to the camera and back; one
+        // shot breaks it (see Breaking cameras below). The
         // view starts looking back along the line the camera was shot from,
         // and pans with W/A/S/D (the game doesn't pass mouse movement through
         // while the view is on another entity), with the player held still
@@ -164,6 +165,73 @@ namespace ZeusOnlyMode
                 RemoveCamera(slot);
                 cameraUsedThisLife.Remove(slot);
             });
+            RegisterEventHandler<EventBulletImpact>(OnCameraBulletImpact);
+        }
+
+        // --- Breaking cameras ----------------------------------------------------
+        //
+        // The webcam is beams, which shots pass through, so hits are tested
+        // directly: a bullet (or zap) whose path from the shooter's eye to
+        // where it landed passes through the head or arm breaks it, and so
+        // does a lightning ball flying through it. One hit is enough; whoever
+        // is watching is put back in their own view and can move again.
+
+        private const float CameraHitRadius = 6f;
+
+        private HookResult OnCameraBulletImpact(EventBulletImpact ev, GameEventInfo info)
+        {
+            if (wallCameras.Count == 0)
+                return HookResult.Continue;
+
+            var pawn = ev.Userid?.PlayerPawn.Value;
+            if (pawn == null || !pawn.IsValid || pawn.AbsOrigin == null)
+                return HookResult.Continue;
+
+            var eye = ToVec3(pawn.AbsOrigin) + new Vector3(0, 0, pawn.ViewOffset.Z);
+            var impact = new Vector3(ev.X, ev.Y, ev.Z);
+            int slot = FindHitCamera(eye, impact, 0f);
+            if (slot >= 0)
+                BreakCamera(slot);
+            return HookResult.Continue;
+        }
+
+        // The owner slot of a placed camera this path passes through (within
+        // `radius` extra, for something with size), or -1
+        private int FindHitCamera(Vector3 from, Vector3 to, float radius)
+        {
+            foreach (var (slot, camera) in wallCameras)
+            {
+                if (!camera.Placed)
+                    continue;
+
+                AngleVectors(camera.Angles, out var look, out _, out _);
+                var pivot = camera.Anchor + camera.Normal * CameraArmLength;
+                float reach = CameraHitRadius + radius;
+                if (SegmentDistanceSquared(from, to, pivot - look * 3f, pivot + look * 11.5f) <= reach * reach
+                    || SegmentDistanceSquared(from, to, camera.Anchor, pivot) <= (2f + radius) * (2f + radius))
+                    return slot;
+            }
+            return -1;
+        }
+
+        private void BreakCamera(int slot)
+        {
+            if (!wallCameras.TryGetValue(slot, out var camera) || !camera.Placed)
+                return;
+
+            AngleVectors(camera.Angles, out var look, out _, out _);
+            var center = camera.Anchor + camera.Normal * CameraArmLength + look * 4f;
+            bool watching = camera.Viewing;
+            var color = BoltGlowColor(camera.Color);
+
+            RemoveCamera(slot);   // puts a watcher back in their own view
+
+            EmitBurstSparks(center, color, 24, 150f, 420f);
+            var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 1f);
+            SpawnParticle(FxImpactArcs, center, Vector3.Zero, 1f);
+            PlaySound(flash, "DoSpark");
+
+            Utilities.GetPlayerFromSlot(slot)?.PrintToCenter(watching ? "Your camera was shot out!" : "Your camera was destroyed");
         }
 
         private bool IsViewingCamera(int slot) => wallCameras.TryGetValue(slot, out var camera) && camera.Viewing;
