@@ -21,6 +21,10 @@ ball. It costs the same charge as a normal zap, so it shares the Zeus's recharge
 dissipates on them like it hit a wall. It explodes on walls and fizzles out after 2.5 seconds.
 Super Zeus works with or without Zeus Only Mode.
 
+Hyper Zeus (hyperzeus / css_hyperzeus in console, !hyperzeus / /hyperzeus in chat, same admin flag, 1 or 0 to force it) is the rapid-fire version:
+balls fire three times as fast as the normal zap, from a three-ball energy pool that refills over mp_taser_recharge_time, and a normal zap empties the pool.
+It works on its own or alongside Super Zeus, and is also remembered across map changes and reloads.
+
 Zeus Colors
 -----------
 Any player can pick one color for both their Zeus zap and their lightning ball: Red, Orange,
