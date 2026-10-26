@@ -16,7 +16,7 @@ namespace ZeusOnlyMode
         // picks come back the next time all modes are on.
         // ------------------------------------------------------------------
 
-        private enum FireMode { Super, Hyper, Reflect, Grapple, Camera }
+        private enum FireMode { Super, Hyper, Reflect, Grapple, Camera, Sensor }
 
         private sealed record FireModeInfo(FireMode Mode, string Name, string Description);
 
@@ -26,7 +26,8 @@ namespace ZeusOnlyMode
             new(FireMode.Hyper, "Hyper Zeus", $"Rapid small balls, {HyperBallDamage} damage, {HyperBallsPerCharge} per charge"),
             new(FireMode.Reflect, "Reflect Zeus", $"Slower ball that bounces once, {BallDamage} damage"),
             new(FireMode.Grapple, "Grapple", "Pulls you to where it lands; kills on a direct hit"),
-            new(FireMode.Camera, "Camera", "One wall camera per life; right-click to watch, mouse to pan"),
+            new(FireMode.Camera, "Camera", "One wall camera per life; right-click to watch, W/A/S/D to pan"),
+            new(FireMode.Sensor, "Sensor Probe", "One probe a round that warns your team when enemies pass"),
         };
 
         private const float ModePanelSeconds = 2.5f;

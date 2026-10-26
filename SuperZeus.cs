@@ -230,14 +230,18 @@ namespace ZeusOnlyMode
         private int soundLogsLeft;
 
         // volume: null = SoundVolume
-        private void PlaySound(CBaseEntity? source, string sound, float? volume = null)
+        // recipients: null = everyone
+        private void PlaySound(CBaseEntity? source, string sound, float? volume = null, RecipientFilter? recipients = null)
         {
             if (source == null || !source.IsValid)
                 return;
 
             float level = volume ?? SoundVolume;
-            var recipients = new RecipientFilter();
-            recipients.AddAllPlayers();
+            if (recipients == null)
+            {
+                recipients = new RecipientFilter();
+                recipients.AddAllPlayers();
+            }
             uint guid;
             emittingSound = (sound, level);
             try { guid = source.EmitSound(sound, recipients, level); }
@@ -373,6 +377,7 @@ namespace ZeusOnlyMode
             {
                 lastButtons.Remove(slot);
                 noFallDamageUntil.Remove(slot);
+                RemoveSensors(slot);
             });
             RegisterListener<Listeners.OnServerPrecacheResources>(manifest =>
             {
@@ -387,6 +392,8 @@ namespace ZeusOnlyMode
                 ballEnergy.Clear();
                 grapples.Clear();
                 wallCameras.Clear();
+                sensors.Clear();
+                sensorUsedThisRound.Clear();
                 cameraUsedThisLife.Clear();
                 noFallDamageUntil.Clear();
                 bodyZaps.Clear();
@@ -407,6 +414,7 @@ namespace ZeusOnlyMode
                 ClearLightningBalls();
                 ClearGrapples();
                 ClearCameras();
+                ClearSensors();
                 return HookResult.Continue;
             });
         }
@@ -417,6 +425,7 @@ namespace ZeusOnlyMode
             ClearLightningBalls();
             ClearGrapples();
             ClearCameras();
+            ClearSensors();
         }
 
         // css_superzeus: registered by attribute, exactly like other plugins'
@@ -502,6 +511,7 @@ namespace ZeusOnlyMode
                 Server.PrintToChatAll($" {ChatColors.LightBlue}Super Zeus Disabled.");
                 ClearGrapples();
                 ClearCameras();
+                ClearSensors();
             }
         }
 
@@ -641,6 +651,12 @@ namespace ZeusOnlyMode
             if (FireModeOf(player) == FireMode.Camera)
             {
                 OnCameraClick(player, pawn, weapon.As<CCSWeaponBase>());
+                return;
+            }
+
+            if (FireModeOf(player) == FireMode.Sensor)
+            {
+                OnSensorClick(player, pawn, weapon.As<CCSWeaponBase>());
                 return;
             }
 
@@ -963,6 +979,9 @@ namespace ZeusOnlyMode
 
             if (wallCameras.Count > 0)
                 UpdateCameras();
+
+            if (sensors.Count > 0)
+                UpdateSensors();
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
