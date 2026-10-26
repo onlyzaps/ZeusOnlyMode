@@ -16,7 +16,7 @@ namespace ZeusOnlyMode
         // picks come back the next time all modes are on.
         // ------------------------------------------------------------------
 
-        private enum FireMode { Super, Hyper, Reflect, Grapple }
+        private enum FireMode { Super, Hyper, Reflect, Grapple, Camera }
 
         private sealed record FireModeInfo(FireMode Mode, string Name, string Description);
 
@@ -26,6 +26,7 @@ namespace ZeusOnlyMode
             new(FireMode.Hyper, "Hyper Zeus", $"Rapid small balls, {HyperBallDamage} damage, {HyperBallsPerCharge} per charge"),
             new(FireMode.Reflect, "Reflect Zeus", $"Slower ball that bounces once, {BallDamage} damage"),
             new(FireMode.Grapple, "Grapple", "Pulls you to where it lands; kills on a direct hit"),
+            new(FireMode.Camera, "Camera", "One wall camera per life; right-click to watch, mouse to pan"),
         };
 
         private const float ModePanelSeconds = 2.5f;
@@ -87,6 +88,7 @@ namespace ZeusOnlyMode
             int index = Array.FindIndex(FireModes, f => f.Mode == current);
             var next = FireModes[(index + 1) % FireModes.Length];
 
+            StopCameraView(player.Slot);   // right-click wouldn't bring them back in another mode
             fireModes[player.SteamID] = next.Mode;
             SaveFireModes();
             ShowModePanel(player, next);

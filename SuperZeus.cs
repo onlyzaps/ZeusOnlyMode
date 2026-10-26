@@ -345,6 +345,7 @@ namespace ZeusOnlyMode
             LoadSettings();
             LoadSuperZeusState();
             LoadFireModes();
+            LoadCameras();
             soundLogsLeft = 6;
             HookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
 
@@ -385,6 +386,8 @@ namespace ZeusOnlyMode
                 pendingRecharges.Clear();
                 ballEnergy.Clear();
                 grapples.Clear();
+                wallCameras.Clear();
+                cameraUsedThisLife.Clear();
                 noFallDamageUntil.Clear();
                 bodyZaps.Clear();
                 bodyZapsByPawn.Clear();
@@ -403,6 +406,7 @@ namespace ZeusOnlyMode
             {
                 ClearLightningBalls();
                 ClearGrapples();
+                ClearCameras();
                 return HookResult.Continue;
             });
         }
@@ -412,6 +416,7 @@ namespace ZeusOnlyMode
             UnhookUserMessage(SosStartSoundEventId, OnSosStartSoundEvent, HookMode.Pre);
             ClearLightningBalls();
             ClearGrapples();
+            ClearCameras();
         }
 
         // css_superzeus: registered by attribute, exactly like other plugins'
@@ -496,6 +501,7 @@ namespace ZeusOnlyMode
             {
                 Server.PrintToChatAll($" {ChatColors.LightBlue}Super Zeus Disabled.");
                 ClearGrapples();
+                ClearCameras();
             }
         }
 
@@ -609,6 +615,13 @@ namespace ZeusOnlyMode
                 return;
             }
 
+            // Watching a camera: right-click with anything in hand comes back
+            if (IsViewingCamera(player.Slot))
+            {
+                StopCameraView(player.Slot);
+                return;
+            }
+
             var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
             if (weapon == null || !weapon.IsValid || weapon.DesignerName != "weapon_taser")
             {
@@ -622,6 +635,12 @@ namespace ZeusOnlyMode
             if (!superZeusEnabled)
             {
                 Logger.LogInformation("[SuperZeus] {Name} right-clicked with the Zeus, but Super Zeus is off", player.PlayerName);
+                return;
+            }
+
+            if (FireModeOf(player) == FireMode.Camera)
+            {
+                OnCameraClick(player, pawn, weapon.As<CCSWeaponBase>());
                 return;
             }
 
@@ -941,6 +960,9 @@ namespace ZeusOnlyMode
 
             if (grapples.Count > 0)
                 UpdateGrapples();
+
+            if (wallCameras.Count > 0)
+                UpdateCameras();
 
             for (int i = lightningBalls.Count - 1; i >= 0; i--)
             {
