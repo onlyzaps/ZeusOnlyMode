@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Entities.Constants;
 using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.UserMessages;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
@@ -27,9 +28,11 @@ namespace ZeusOnlyMode
         // while diagonal ones flew). 1900 stays under it in every direction.
         private const float BallSpeed = 1900f;
 
-        // Sounds are kept to one per event: CS2 plays sound events at full level
-        // whatever volume EmitSound is given, so loudness is controlled by not
-        // stacking several sounds on one moment.
+        // Volume for every sound the plugin plays (1 = the game's own level).
+        // Read from settings.json on every load, so editing it and reloading
+        // the plugin applies the new value.
+        private const float DefaultSoundVolume = 0.4f;
+        private float SoundVolume = DefaultSoundVolume;
         private const float BallLifetime = 2.5f;
         private const float BallCooldown = 1.0f;
         private const float BallOrbRadius = 12f;     // hit size: the visible center orb
@@ -162,8 +165,85 @@ namespace ZeusOnlyMode
             }
         }
 
+        // configs/plugins/ZeusOnlyMode/settings.json, created with defaults if missing
+        private void LoadSettings()
+        {
+            string path = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", "ZeusOnlyMode", "settings.json"));
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    File.WriteAllText(path, JsonSerializer.Serialize(new { SoundVolume = DefaultSoundVolume }, new JsonSerializerOptions { WriteIndented = true }));
+                }
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                SoundVolume = doc.RootElement.TryGetProperty("SoundVolume", out var volume) && volume.TryGetSingle(out var value)
+                    ? Math.Clamp(value, 0f, 1f)
+                    : DefaultSoundVolume;
+            }
+            catch (Exception ex)
+            {
+                SoundVolume = DefaultSoundVolume;
+                Logger.LogError("Could not read {Path}: {Message}", path, ex.Message);
+            }
+
+            Logger.LogInformation("[SuperZeus] Sound volume {Volume} (settings.json)", SoundVolume);
+        }
+
+        // --- Sound volume -------------------------------------------------------
+        //
+        // CS2 ignores the volume EmitSound is given; a sound event's level is one
+        // of its parameters ("public.volume"), set afterwards with a
+        // GE_SosSetSoundEventParams message naming the sound by the guid
+        // EmitSound returns. packed_params holds the parameter name's
+        // MurmurHash2 (lowercase, seed 0x31415926), a type tag (0x08 = float),
+        // a 16-bit length and the value, all little-endian.
+
+        private const int SosSetSoundEventParamsId = 210;
+        private static readonly byte[] VolumeParamHeader = { 0xE9, 0x54, 0x60, 0xBD, 0x08, 0x04, 0x00 };
+        private bool loggedVolumeSend;
+
+        private void PlaySound(CBaseEntity? source, string sound)
+        {
+            if (source == null || !source.IsValid)
+                return;
+
+            var recipients = new RecipientFilter();
+            recipients.AddAllPlayers();
+            uint guid = source.EmitSound(sound, recipients, SoundVolume);
+            if (guid == 0 || SoundVolume >= 1f)
+                return;
+
+            SendSoundVolume(guid, recipients, sound);
+            // Again next frame, in case the first one beat the sound's start
+            Server.NextFrame(() => SendSoundVolume(guid, recipients, sound));
+        }
+
+        private void SendSoundVolume(uint guid, RecipientFilter recipients, string sound)
+        {
+            try
+            {
+                using var message = UserMessage.FromId(SosSetSoundEventParamsId);
+                message.SetUInt("soundevent_guid", guid);
+                message.SetBytes("packed_params", VolumeParamHeader.Concat(BitConverter.GetBytes(SoundVolume)).ToArray());
+                message.Send(recipients);
+
+                if (!loggedVolumeSend)
+                {
+                    loggedVolumeSend = true;
+                    Logger.LogInformation("[SuperZeus] Set {Sound} (guid {Guid}) to volume {Volume}", sound, guid, SoundVolume);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[SuperZeus] Setting the volume of {Sound} failed: {Message}", sound, ex.Message);
+            }
+        }
+
         private void LoadSuperZeus()
         {
+            LoadSettings();
             LoadSuperZeusState();
 
             // Both spellings work from console/RCON. CS# also forwards "!superzeus"
@@ -428,7 +508,7 @@ namespace ZeusOnlyMode
             if (zeus.Clip1 <= 0)
             {
                 Logger.LogInformation("[SuperZeus] {Name}'s alt-fire ignored: the Zeus is recharging", player.PlayerName);
-                pawn.EmitSound("Weapon_Taser.ChargeNotReady");
+                PlaySound(pawn, "Weapon_Taser.ChargeNotReady");
                 return;
             }
 
@@ -489,7 +569,7 @@ namespace ZeusOnlyMode
 
                 var owner = zeus.OwnerEntity.Value;
                 if (owner != null && owner.IsValid)
-                    owner.EmitSound("Weapon_Taser.ChargeReady");
+                    PlaySound(owner, "Weapon_Taser.ChargeReady");
 
                 pendingRecharges.RemoveAt(i);
             }
@@ -579,7 +659,8 @@ namespace ZeusOnlyMode
             SpawnParticle(FxMuzzleSmokePuff, muzzle, angles, 3f);
             SpawnParticle(FxMuzzleSmokeTrail, muzzle, angles, 5f, pawn);
 
-            pawn.EmitSound("Weapon_Taser.Single");
+            PlaySound(pawn, "Weapon_Taser.Single");
+            PlaySound(pawn, "Weapon_Taser.ChargeReady_Zap");
 
             KickZeus(zeus);
         }
@@ -875,7 +956,7 @@ namespace ZeusOnlyMode
                 if (!lethal)
                 {
                     ImpactBurst(chest);
-                    pawn.EmitSound("Weapon_Taser.Hit");
+                    PlaySound(pawn, "Weapon_Taser.Hit");
                 }
             }
             catch (Exception ex)
@@ -1092,7 +1173,10 @@ namespace ZeusOnlyMode
             SpawnFading(FxBurnSmoke, ground, BurnSmokeTime, BurnSmokeLinger);
 
             var flash = SpawnParticle(FxImpactFlare, center, Vector3.Zero, 2f);
-            flash?.EmitSound("Player.DeathTaser");
+            PlaySound(flash, "Player.DeathTaser");
+            PlaySound(flash, "Weapon_Taser.Hit");
+            PlaySound(flash, "DoSpark");
+            PlaySound(flash, "Breakable.Spark");
         }
 
         private const float DisintegrateCrackleLife = 0.4f;
@@ -1297,7 +1381,8 @@ namespace ZeusOnlyMode
         {
             LeaveScorch(pos);
             var burst = ImpactBurst(pos);
-            burst?.EmitSound("DoSpark");
+            PlaySound(burst, "Weapon_Taser.Hit");
+            PlaySound(burst, "DoSpark");
         }
 
         // --- Scorch marks -----------------------------------------------------
